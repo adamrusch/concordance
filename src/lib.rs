@@ -7,6 +7,7 @@ pub mod api;
 pub mod auth;
 pub mod client;
 pub mod error;
+pub mod mcp;
 pub mod proposal;
 pub mod render;
 pub mod store;

@@ -49,6 +49,9 @@ enum Commands {
     /// Manage comments
     #[command(subcommand)]
     Comments(CommentsCmd),
+
+    /// Run the MCP server over stdio (for use by LLM agents)
+    Mcp,
 }
 
 // ── Instances ─────────────────────────────────────────────────────────────────
@@ -175,6 +178,9 @@ async fn run() -> anyhow::Result<()> {
         Commands::Comments(cmd) => {
             let (name, client) = make_client(&store, cli.instance.as_deref())?;
             handle_comments(&client, &name, cmd).await?;
+        }
+        Commands::Mcp => {
+            concordance::mcp::run_stdio(store).await?;
         }
     }
     Ok(())
