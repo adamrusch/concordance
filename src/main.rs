@@ -12,7 +12,13 @@ use concordance::{
 };
 
 #[derive(Parser)]
-#[command(name = "concordance", about = "LLM-mediated client for the Ekklesia governance API", version)]
+#[command(
+    name = "concordance",
+    about = "LLM-mediated client for the Ekklesia governance API",
+    version,
+    before_help = concordance::BANNER,
+    arg_required_else_help = true,
+)]
 struct Cli {
     #[arg(
         long,

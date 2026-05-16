@@ -763,7 +763,9 @@ impl ServerHandler for ConcordanceServer {}
 
 /// Run the MCP server over stdio. Blocks until the client disconnects.
 pub async fn run_stdio(store: Store) -> anyhow::Result<()> {
-    // Logs go to stderr; stdout is reserved for MCP messages.
+    // Banner + logs go to stderr; stdout is reserved for MCP JSON-RPC.
+    eprintln!("{}", crate::BANNER);
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
