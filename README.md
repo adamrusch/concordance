@@ -11,10 +11,11 @@
 | Rust core (API client, parser, store) | ✅ inherited from exegesis |
 | CLI (`concordance ...`) | ✅ same subcommands as exegesis |
 | Claude Code workflow (tutorial + auth probe) | ✅ [docs/getting-started-with-claude.md](docs/getting-started-with-claude.md) |
-| **MCP server (`concordance mcp`)** | ✅ **v0.2 — 7 tools, live-verified on hydra-voting.intersectmbo.org** |
+| MCP server (`concordance mcp`) | ✅ v0.2 — 7 tools |
+| **Identity & signature contract** | ✅ **v0.3 — 5 identity tools; every comment auto-signed** |
 | MCP tool stretch surface (likes, reply lists, comment edit, search filter) | 🚧 v0.2.1 |
-| Generated tool descriptors (OpenAI / Gemini schemas exported from MCP) | 🚧 v0.3 |
-| Proposal authoring tools over MCP (submit / withdraw) | 🚧 v0.3 |
+| Generated tool descriptors (OpenAI / Gemini schemas exported from MCP) | 🚧 v0.4 |
+| Proposal authoring tools over MCP (submit / withdraw) | 🚧 v0.4 |
 
 ## Quick start (Claude Code)
 
@@ -41,21 +42,33 @@
    }
    ```
 
-4. **Use it from chat.** Ask Claude things like *"show me the open Cardano Budget 2026 proposals"*, *"render proposal `<id>` and the comment thread"*, *"draft a comment on the third one — I'll OK the text before you submit."* Claude calls the right MCP tools; `create_comment` always prompts for your approval (it's marked `destructiveHint: true`).
+4. **Use it from chat.** First-time users: *"Set up my Concordance identity"* — Claude collects your name, X handle, and Cardano Forum username (these become the signature on every comment you post). Then ask things like *"show me the open Cardano Budget 2026 proposals"*, *"render proposal `<id>` and the comment thread"*, *"draft a comment on the third one — I'll OK the text before you submit."* Claude calls the right MCP tools; `create_comment` always prompts for your approval (it's marked `destructiveHint: true`).
 
-## The v0.2 tool catalog
+## The v0.3 tool catalog
 
-7 tools, all live-verified. Full spec with rationale at [docs/mcp-tool-surface.md](docs/mcp-tool-surface.md).
+12 tools, all live-verified. Full spec with rationale at [docs/mcp-tool-surface.md](docs/mcp-tool-surface.md).
+
+### Identity & signature (v0.3)
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `auth_status` | read, local | Is the stored JWT valid? How long until it expires? |
+| `set_identity` | write, local | Stores name + X handle + Cardano Forum username in `~/.config/concordance/identity.toml` |
+| `get_identity` | read, local | Returns the saved identity and the signature it will produce |
+| `link_stake_address` | write, local | Extracts the stake address from the configured JWT and writes it into the identity file |
+| `get_verification_post` | read, local | Returns the suggested public X / Cardano Forum post that lets others verify the signature is yours |
+| `get_signature` | read, local | Returns the exact signature block that will be appended to comments |
+
+### Review and comment (v0.2)
+
+| Tool | Kind | What it does |
+|---|---|---|
+| `auth_status` | read, local | Is the stored JWT valid? How long until it expires? Surfaces stake address + sign_type. |
 | `list_votes` | read | Lists vote cycles with computed `feedback_window` and `voting_window` state (is_open + time_remaining_seconds) |
 | `list_proposals` | read | Lists proposals in a cycle, filterable by status (`live` / `withdrawn` / `all`) |
 | `get_proposal` | read | Full proposal object including `meta_data` |
 | `render_proposal_markdown` | read | Proposal as human-readable Markdown + frontmatter blob |
 | `fetch_proposal_thread` | read, composite | One-call review payload: proposal markdown + feedback window + full comment tree |
-| `create_comment` | **destructive** | Post a public comment. MCP clients prompt before invocation. |
+| `create_comment` | **destructive** | Post a public comment. Signature appended automatically. MCP clients prompt before invocation. |
 
 ## Direct CLI use
 
@@ -84,7 +97,7 @@ Where a change benefits both, it should flow back upstream. The Claude-mediated 
 cargo test --release
 ```
 
-94 tests across 5 suites: unit tests for parsing/auth/store, property tests, integration round-trip tests, and an MCP smoke test that spawns the binary, drives the MCP protocol over stdio, and asserts the v0.2 catalog + annotation contract.
+106 tests across 5 suites: unit tests for parsing/auth/store/identity, property tests, integration round-trip tests, and an MCP smoke test that spawns the binary, drives the MCP protocol over stdio, and asserts the v0.3 catalog + annotation contract + identity lifecycle.
 
 ## License
 
