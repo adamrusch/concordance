@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    api::Vote,
+    api::{Comment, Vote},
     auth::{inspect_jwt, require_valid_jwt},
     client::EkklesiaClient,
     error::Error,
@@ -181,11 +181,81 @@ pub struct RenderProposalMarkdownArgs {
     pub instance: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FetchProposalThreadArgs {
+    /// Proposal id (24-hex).
+    pub proposal_id: String,
+    /// Whether to recursively fetch replies under each top-level comment.
+    /// Default `true`. Set to `false` for a flat top-level-only view.
+    #[serde(default = "default_true")]
+    pub include_replies: bool,
+    /// Maximum reply depth. 0 = top-level only (same as `include_replies = false`).
+    /// 1 = top-level + direct replies. Default `2`.
+    /// Capped at 10 to avoid pathological fanout.
+    #[serde(default = "default_depth")]
+    pub max_depth: u32,
+    /// Instance name. Omit to use the configured default instance.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
 fn default_page() -> u32 {
     1
 }
 fn default_limit() -> u32 {
     20
+}
+fn default_true() -> bool {
+    true
+}
+fn default_depth() -> u32 {
+    2
+}
+
+/// Render a comment + its (already-fetched) child replies as a JSON node.
+fn render_comment_node(c: &Comment, replies: Vec<Value>) -> Value {
+    serde_json::json!({
+        "id": c.id,
+        "parent_id": c.parent_id,
+        "author": c.author.as_ref().map(|a| serde_json::json!({
+            "name": a.name,
+            "type": a.author_type,
+        })),
+        "content": c.content,
+        "created_at": c.created_at.map(|d| d.to_rfc3339()),
+        "reply_count": c.reply_count,
+        "like_count": c.like_count,
+        "replies": replies,
+    })
+}
+
+/// Recursively fetch reply tree under a comment, stopping at `max_depth`.
+/// Returns a `Vec<Value>` ready to splice into a parent's `replies` field.
+/// Boxed because the future is self-referential through recursion.
+fn fetch_replies_recursive<'a>(
+    client: &'a EkklesiaClient,
+    parent_id: String,
+    depth: u32,
+    max_depth: u32,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<Value>, Error>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        if depth >= max_depth {
+            return Ok(vec![]);
+        }
+        let page = client.list_comment_replies(&parent_id, 1, 100).await?;
+        let mut out = Vec::with_capacity(page.data.len());
+        for reply in &page.data {
+            let kids = if reply.reply_count.unwrap_or(0) > 0 {
+                fetch_replies_recursive(client, reply.id.clone(), depth + 1, max_depth).await?
+            } else {
+                Vec::new()
+            };
+            out.push(render_comment_node(reply, kids));
+        }
+        Ok(out)
+    })
 }
 
 // ── Tools ────────────────────────────────────────────────────────────────────
@@ -333,6 +403,74 @@ impl ConcordanceServer {
             "title": proposal.title,
             "markdown": markdown,
             "frontmatter": proposal.meta_data,
+        }))
+    }
+
+    /// Composite read: fetch a proposal as Markdown, its vote-cycle feedback
+    /// window, and the full comment thread (top-level + nested replies up to
+    /// `max_depth`). Costs one tool call instead of the 5–10 a pure-primitive
+    /// agent would make. Designed for "give me everything I need to review."
+    #[tool(
+        name = "fetch_proposal_thread",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn fetch_proposal_thread(
+        &self,
+        Parameters(args): Parameters<FetchProposalThreadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let instance = self.resolve_instance(args.instance)?;
+        let client = self.make_client(&instance)?;
+
+        let max_depth = if !args.include_replies {
+            0
+        } else {
+            args.max_depth.min(10)
+        };
+
+        let proposal = client
+            .get_proposal(&args.proposal_id)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let vote_window = if let Some(vote_id) = &proposal.vote_id {
+            match client.get_vote(vote_id).await {
+                Ok(v) => Some(window_state(
+                    v.feedback_start_date,
+                    v.feedback_end_date,
+                    Utc::now(),
+                )),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        let top_level = client
+            .list_comments(&proposal.id, 1, 100)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut comments = Vec::with_capacity(top_level.data.len());
+        for c in &top_level.data {
+            let kids = if max_depth > 0 && c.reply_count.unwrap_or(0) > 0 {
+                fetch_replies_recursive(&client, c.id.clone(), 0, max_depth)
+                    .await
+                    .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            } else {
+                Vec::new()
+            };
+            comments.push(render_comment_node(c, kids));
+        }
+
+        json_result(serde_json::json!({
+            "proposal_id": proposal.id,
+            "title": proposal.title,
+            "status": proposal.status,
+            "proposal_markdown": render_proposal_md(&proposal),
+            "feedback_window": vote_window,
+            "comment_count_total": top_level.meta.total,
+            "comment_count_fetched": comments.len(),
+            "comments": comments,
         }))
     }
 }

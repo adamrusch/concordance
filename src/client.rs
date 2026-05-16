@@ -106,6 +106,19 @@ impl EkklesiaClient {
         .await
     }
 
+    pub async fn list_comment_replies(
+        &self,
+        comment_id: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<Page<Comment>> {
+        self.get(&format!(
+            "{}/api/v0/comments/{comment_id}/replies?page={page}&limit={limit}",
+            self.base_url
+        ))
+        .await
+    }
+
     pub async fn create_comment(&self, req: &CreateCommentRequest) -> Result<Value> {
         self.post(&format!("{}/api/v0/comments", self.base_url), req)
             .await

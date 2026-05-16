@@ -84,7 +84,7 @@ pub struct CreateProposalRequest {
 
 // ── Comments ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment {
     #[serde(rename = "_id")]
@@ -97,7 +97,7 @@ pub struct Comment {
     pub author: Option<CommentAuthor>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CommentAuthor {
     pub name: Option<String>,
     #[serde(rename = "type")]
