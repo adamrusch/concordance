@@ -23,6 +23,7 @@ use crate::{
     auth::{inspect_jwt, require_valid_jwt},
     client::EkklesiaClient,
     error::Error,
+    identity::Identity,
     render::render_proposal_md,
     store::Store,
 };
@@ -126,6 +127,25 @@ fn render_vote(v: &Vote, now: DateTime<Utc>) -> Value {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AuthStatusArgs {
+    /// Instance name. Omit to use the configured default instance.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetIdentityArgs {
+    /// The name the user goes by in the Cardano community. This appears on
+    /// every comment they post via Concordance.
+    pub name: String,
+    /// X (Twitter) handle without the leading `@`. Use the literal string
+    /// "none" if the user has no X account they want to associate.
+    pub x_handle: String,
+    /// Cardano Forum username. Use "none" if no Forum account.
+    pub cardano_forum_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InstanceOnlyArgs {
     /// Instance name. Omit to use the configured default instance.
     #[serde(default)]
     pub instance: Option<String>,
@@ -278,9 +298,9 @@ fn fetch_replies_recursive<'a>(
 #[tool_router]
 impl ConcordanceServer {
     /// Report whether the stored JWT for an instance is valid and how long
-    /// until it expires. Local-only — no network call. Use before any write
-    /// to avoid the failure mode of submitting a comment with an expired
-    /// token.
+    /// until it expires. Local-only — no network call. Surfaces the
+    /// `userId` (stake address) and `signType` (`stake` or `drep`) so the
+    /// agent can confirm which wallet/identity is in use.
     #[tool(
         name = "auth_status",
         annotations(read_only_hint = true, idempotent_hint = true)
@@ -303,6 +323,8 @@ impl ConcordanceServer {
                     "valid": !info.is_expired,
                     "expires_at": info.expires_at.to_rfc3339(),
                     "seconds_remaining": info.seconds_remaining,
+                    "user_id": info.user_id,
+                    "sign_type": info.sign_type,
                 }),
                 Err(e) => serde_json::json!({
                     "instance": instance,
@@ -312,6 +334,156 @@ impl ConcordanceServer {
             },
         };
         json_result(report)
+    }
+
+    /// Store the user's Cardano community identity — name, X handle, and
+    /// Cardano Forum username — to the local identity file. Call this
+    /// before any wallet step, so the signature can be built before the
+    /// first comment is posted.
+    ///
+    /// Existing fields are overwritten; the stake address (if previously
+    /// linked) is preserved. Use the string "none" for x_handle or
+    /// cardano_forum_name if the user has no account on that platform.
+    #[tool(
+        name = "set_identity",
+        annotations(read_only_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn set_identity(
+        &self,
+        Parameters(args): Parameters<SetIdentityArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        for (label, value) in [
+            ("name", &args.name),
+            ("x_handle", &args.x_handle),
+            ("cardano_forum_name", &args.cardano_forum_name),
+        ] {
+            if value.trim().is_empty() {
+                return Err(ErrorData::invalid_params(
+                    format!("{label} cannot be empty; use \"none\" if not applicable"),
+                    None,
+                ));
+            }
+        }
+
+        // Preserve stake_address across re-runs of set_identity.
+        let prior_stake = Identity::load().ok().and_then(|i| i.stake_address);
+        let id = Identity {
+            name: args.name.trim().to_string(),
+            x_handle: args.x_handle.trim().trim_start_matches('@').to_string(),
+            cardano_forum_name: args.cardano_forum_name.trim().to_string(),
+            stake_address: prior_stake,
+        };
+        id.save()
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        json_result(serde_json::json!({
+            "saved_to": Identity::default_path().display().to_string(),
+            "identity": &id,
+            "signature_preview": id.signature(),
+        }))
+    }
+
+    /// Return the user's saved identity. Errors with a configuration hint if
+    /// no identity is stored.
+    #[tool(
+        name = "get_identity",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn get_identity(&self) -> Result<CallToolResult, ErrorData> {
+        let id = Identity::load().map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        json_result(serde_json::json!({
+            "identity": &id,
+            "saved_to": Identity::default_path().display().to_string(),
+            "signature": id.signature(),
+        }))
+    }
+
+    /// Extract the stake address (`userId`) from the configured JWT and write
+    /// it into the local identity file. Run this after the user logs in to
+    /// Hydra-Voting with their wallet and `auth set --jwt <token>` (or the
+    /// MCP-equivalent has stored the token).
+    ///
+    /// Local-only: reads the sled store, doesn't hit the network. Errors if
+    /// no identity is configured yet or if the JWT lacks a `userId` claim.
+    #[tool(
+        name = "link_stake_address",
+        annotations(read_only_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn link_stake_address(
+        &self,
+        Parameters(args): Parameters<InstanceOnlyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let instance = self.resolve_instance(args.instance)?;
+        let mut id = Identity::load()
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let jwt = self
+            .store
+            .get_token(&instance)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let info =
+            inspect_jwt(&jwt).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let stake = info.user_id.ok_or_else(|| {
+            ErrorData::invalid_params(
+                "JWT has no userId claim; cannot derive stake address".to_string(),
+                None,
+            )
+        })?;
+        id.stake_address = Some(stake.clone());
+        id.save()
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        json_result(serde_json::json!({
+            "instance": instance,
+            "stake_address": stake,
+            "sign_type": info.sign_type,
+            "identity": &id,
+        }))
+    }
+
+    /// Return the suggested public verification post — text the user
+    /// copy-pastes to X or the Cardano Forum so other community members can
+    /// link the Concordance signature back to a real human. The
+    /// `{stake_address}` and `{Hydra Voting Portal URL}` placeholders are
+    /// substituted with the user's stake address and the instance base URL.
+    ///
+    /// Errors if the stake address has not been linked yet (the user must
+    /// run `link_stake_address` first) or if no identity is configured.
+    #[tool(
+        name = "get_verification_post",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn get_verification_post(
+        &self,
+        Parameters(args): Parameters<InstanceOnlyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let instance = self.resolve_instance(args.instance)?;
+        let config = self
+            .store
+            .get_instance(&instance)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let id =
+            Identity::load().map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let post = id
+            .verification_post(&config.url)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        json_result(serde_json::json!({
+            "post_text": post,
+            "stake_address": id.stake_address,
+            "portal_url": config.url,
+        }))
+    }
+
+    /// Return the signature block that will be appended to every comment.
+    /// Local-only, no I/O beyond reading the identity file. Useful for
+    /// previewing the signature with the user before they post.
+    #[tool(
+        name = "get_signature",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn get_signature(&self) -> Result<CallToolResult, ErrorData> {
+        let id = Identity::load().map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        json_result(serde_json::json!({
+            "signature": id.signature(),
+            "identity": &id,
+        }))
     }
 
     /// List the vote cycles configured on the instance. Each entry includes
