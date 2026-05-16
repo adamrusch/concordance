@@ -19,6 +19,12 @@ pub struct TokenInfo {
     pub is_expired: bool,
     /// Seconds until expiry; negative if already expired.
     pub seconds_remaining: i64,
+    /// The `userId` claim — typically a Cardano stake address (Bech32) for
+    /// wallet-signed tokens. None if the claim is absent.
+    pub user_id: Option<String>,
+    /// The `signType` claim — e.g. `"stake"` for stake-key signed tokens or
+    /// `"drep"` for DRep-key signed tokens. None if absent.
+    pub sign_type: Option<String>,
 }
 
 impl TokenInfo {
@@ -68,10 +74,21 @@ pub fn inspect_jwt(token: &str) -> Result<TokenInfo> {
     let now = Utc::now();
     let seconds_remaining = (expires_at - now).num_seconds();
 
+    let user_id = claims
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let sign_type = claims
+        .get("signType")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     Ok(TokenInfo {
         expires_at,
         is_expired: seconds_remaining <= 0,
         seconds_remaining,
+        user_id,
+        sign_type,
     })
 }
 
@@ -112,6 +129,32 @@ mod tests {
         let info = inspect_jwt(&make_jwt(past)).unwrap();
         assert!(info.is_expired);
         assert!(info.seconds_remaining <= 0);
+    }
+
+    #[test]
+    fn user_id_and_sign_type_extracted_when_present() {
+        // Real-shaped Hydra-Voting JWT: {userId, signType, iat, exp}
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let exp = Utc::now().timestamp() + 3600;
+        let payload_json = format!(
+            r#"{{"userId":"stake1u8td6l5sakfcpm6uz85v942xu5f76kzj9qz33c7986d0dxc3sxnvt","signType":"stake","iat":0,"exp":{exp}}}"#
+        );
+        let payload = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let token = format!("{header}.{payload}.sig");
+        let info = inspect_jwt(&token).unwrap();
+        assert_eq!(
+            info.user_id.as_deref(),
+            Some("stake1u8td6l5sakfcpm6uz85v942xu5f76kzj9qz33c7986d0dxc3sxnvt")
+        );
+        assert_eq!(info.sign_type.as_deref(), Some("stake"));
+    }
+
+    #[test]
+    fn user_id_and_sign_type_are_none_when_absent() {
+        // The legacy test-shaped JWT has neither claim.
+        let info = inspect_jwt(&make_jwt(Utc::now().timestamp() + 3600)).unwrap();
+        assert!(info.user_id.is_none());
+        assert!(info.sign_type.is_none());
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub enum Error {
     #[error("no default instance configured — run: concordance instances add <url>")]
     NoDefaultInstance,
 
+    #[error(
+        "no identity configured — set one via the `set_identity` MCP tool, or write {}",
+        crate::identity::Identity::default_path().display()
+    )]
+    NoIdentity,
+
     #[error("store error: {0}")]
     Store(#[from] sled::Error),
 
