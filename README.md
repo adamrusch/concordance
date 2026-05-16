@@ -1,6 +1,6 @@
 # Concordance
 
-**A bridge between an AI assistant and the Cardano governance feedback system.** Concordance lets you ask Claude (or any other capable LLM) to read proposals, summarize comment threads, and help you draft and submit feedback on the [Intersect Hydra Voting](https://hydra-voting.intersectmbo.org) portal — without ever opening the web interface.
+**A bridge between an AI assistant and Hydra Voting — the platform Intersect MBO uses to coordinate Cardano governance proposals before they go on-chain.** Concordance lets you ask Claude (or any other capable LLM) to read proposals, summarize comment threads, and help you draft and submit feedback on the [Intersect Hydra Voting](https://hydra-voting.intersectmbo.org) portal — without ever opening the web interface.
 
 ```
    ____                              _
@@ -17,7 +17,9 @@
 
 ## What is this?
 
-Cardano governance — Constitutional Committee votes, the budget process, treasury withdrawals — runs partly on a feedback platform called **Hydra Voting**, built on the open-source **Ekklesia** stack. Anyone with a Cardano wallet can read proposals there. Anyone with a wallet can post comments. The web UI works fine, but it's a lot of clicking: you scroll dozens of proposals, open each one, read the full document, scroll the comment thread, then draft a reply by hand.
+The Cardano community runs binding governance votes on-chain. Before a proposal reaches that stage, though, there's usually a **consensus-building phase** off-chain — drafting, discussion, public feedback, revision. For two of the biggest processes happening in Cardano right now — the **Intersect Budget Process** and the **election of a slate of nominees for the upcoming Constitutional Committee update** — that consensus-building phase is being **facilitated by Intersect MBO** on a platform called **Hydra Voting**, built on the open-source **Ekklesia** stack. Anyone with a Cardano wallet can read proposals there. Anyone with a wallet can post comments. Once a proposal has the support it needs, Intersect MBO takes the result on-chain for a formal Cardano governance vote.
+
+The web UI works fine, but it's a lot of clicking: you scroll dozens of proposals, open each one, read the full document, scroll the comment thread, then draft a reply by hand.
 
 Concordance changes the input method. Instead of clicking through the web UI, you **talk to an AI assistant**. The assistant uses Concordance to fetch proposals, render comment threads in a form it can summarize, and — when you OK the draft — submit your comment on your behalf.
 
