@@ -1,9 +1,10 @@
 [package]
 name = "concordance"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "LLM-mediated client for the Ekklesia governance API (Cardano Hydra-Voting)."
+repository = "https://github.com/adamrusch/concordance"
 
 [[bin]]
 name = "concordance"
