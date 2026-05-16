@@ -25,10 +25,82 @@ field. For the user-facing setup flow, see
 
 | Tier | Status | Scope |
 |------|--------|-------|
-| v0.2 MVP | 🚧 in progress | 7 tools — what's needed to review proposals and post a comment via an agent |
-| v0.2.1 stretch | planned | 4 tools — fills out read/comment surface |
-| v0.3 authoring | planned | 4 tools — proposal submission/withdrawal (proposers only) |
+| v0.2 MVP | ✅ shipped | 7 tools — review proposals and post a comment via an agent |
+| **v0.3 identity & signature** | ✅ shipped | **5 identity tools + signature injection in `create_comment`** |
+| v0.2.1 stretch | planned | 4 tools — fills out read/comment surface (likes, replies-only list, comment edit, search filter) |
+| v0.4 authoring | planned | 4 tools — proposal submission/withdrawal (proposers only) |
 | local/config | partial | 2 tools — multi-instance helpers |
+
+## Identity & signature contract
+
+Every comment posted through Concordance carries a signature block — name,
+X handle, Cardano Forum username, "via Concordance Feedback Tool" — so any
+reader can attribute the comment to a human via the X/Forum platforms.
+
+The user records their community identity *before* the wallet step, then
+links their stake address afterward. The agent should walk a new user
+through this sequence:
+
+1. `set_identity { name, x_handle, cardano_forum_name }` — write the three
+   identity fields to `$XDG_CONFIG_HOME/concordance/identity.toml`.
+   `"none"` is the documented sentinel for users without an X or Forum
+   account.
+2. (User configures their Hydra-Voting instance and JWT through the
+   existing setup flow — see [getting-started-with-claude.md](getting-started-with-claude.md).)
+3. `link_stake_address` — read the `userId` claim from the stored JWT and
+   record it as the identity's `stake_address`.
+4. `get_verification_post` — return a public post the user copy-pastes to
+   X or the Cardano Forum; readers verify the signature's claimed handle
+   matches the stake address that signs the verification post.
+5. From here on, every `create_comment` automatically appends the
+   signature; calls without a configured identity fail before any I/O.
+
+## v0.3 identity tools
+
+### `set_identity`
+
+| | |
+|---|---|
+| **Args** | `name`, `x_handle`, `cardano_forum_name` |
+| **Annotations** | `readOnlyHint: false`, `idempotentHint: true`, `openWorldHint: false` |
+| **Returns** | `{saved_to, identity, signature_preview}` |
+| **Why** | Captures the community identity before the wallet step. Strips a leading `@` from `x_handle`. Empty fields rejected; `"none"` accepted. Preserves a previously linked `stake_address` across re-runs. |
+
+### `get_identity`
+
+| | |
+|---|---|
+| **Args** | — |
+| **Annotations** | `readOnlyHint`, `idempotentHint`, `openWorldHint: false` |
+| **Returns** | `{identity, saved_to, signature}` |
+| **Why** | Lets the agent confirm an identity is configured before drafting a post. Errors (with the config-file path) if not set. |
+
+### `link_stake_address`
+
+| | |
+|---|---|
+| **Args** | `instance?` |
+| **Annotations** | `readOnlyHint: false`, `idempotentHint: true`, `openWorldHint: false` |
+| **Returns** | `{instance, stake_address, sign_type, identity}` |
+| **Why** | Pulls the `userId` claim from the stored JWT and writes it into the identity file. Local-only — no network. Errors if no identity is configured yet, or if the JWT lacks a `userId` claim. |
+
+### `get_verification_post`
+
+| | |
+|---|---|
+| **Args** | `instance?` |
+| **Annotations** | `readOnlyHint`, `idempotentHint`, `openWorldHint: false` |
+| **Returns** | `{post_text, stake_address, portal_url}` |
+| **Why** | The text the user pastes to X / Cardano Forum so other community members can verify the stake address claimed in the signature. Errors if the stake address isn't linked yet. |
+
+### `get_signature`
+
+| | |
+|---|---|
+| **Args** | — |
+| **Annotations** | `readOnlyHint`, `idempotentHint`, `openWorldHint: false` |
+| **Returns** | `{signature, identity}` |
+| **Why** | Lets the agent preview the exact signature block with the user before posting. |
 
 ## v0.2 MVP
 
@@ -83,10 +155,17 @@ field. For the user-facing setup flow, see
 
 | | |
 |---|---|
-| **Args** | `proposal_id`, `content` (string, ≤ 2000 chars), `parent_id?`, `instance?` |
+| **Args** | `proposal_id`, `content`, `parent_id?`, `omit_signature?` (default `false`), `instance?` |
 | **Annotations** | **`destructiveHint`**, *not* `idempotentHint`, `openWorldHint` |
 | **Returns** | created comment object |
 | **Why** | The reason this project exists. Public and irreversible by non-admins → marked destructive so Claude Code prompts the user before each invocation. The agent should draft in chat, get explicit user OK, then call this tool. |
+
+**Signature injection:** the user's identity signature is appended to every
+post unless `omit_signature: true`. The combined `content + signature` must
+fit the 2000-char server limit; the tool rejects over-length submissions
+with a precise hint about how much to trim. Calls without a configured
+identity fail with a pointer at [`set_identity`](#set_identity). The
+signature applies to replies too — provenance stays clear in deep threads.
 
 ### `auth_status`
 
