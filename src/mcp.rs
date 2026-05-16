@@ -206,11 +206,19 @@ pub struct CreateCommentArgs {
     /// Proposal id (24-hex) to comment on. The proposal must be live and
     /// within its vote cycle's feedback window.
     pub proposal_id: String,
-    /// Comment body. Max 2000 characters server-side. Markdown is accepted.
+    /// Comment body. Markdown is accepted. The Concordance signature is
+    /// appended automatically (see `omit_signature` to opt out); the
+    /// combined `content + signature` must fit the 2000-char server limit.
     pub content: String,
     /// Optional id of a comment to reply to. Omit for a top-level comment.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Suppress the Concordance signature. Defaults to `false` — every
+    /// post normally carries the signature for community traceability.
+    /// Only set `true` in unusual circumstances (e.g. testing) and tell
+    /// the user explicitly that their identity will not be attached.
+    #[serde(default)]
+    pub omit_signature: bool,
     /// Instance name. Omit to use the configured default instance.
     #[serde(default)]
     pub instance: Option<String>,
@@ -665,16 +673,25 @@ impl ConcordanceServer {
     /// by non-admin users (the 15-minute server-side edit window allows typo
     /// fixes via `update_comment`, but withdraw is admin-only).
     ///
+    /// **The Concordance signature is automatically appended to every
+    /// comment** (name, X handle, Cardano Forum name, "via Concordance
+    /// Feedback Tool"). The user must call `set_identity` once before their
+    /// first post — `create_comment` errors if no identity is configured.
+    /// The signature applies to replies too, not just top-level comments,
+    /// so provenance is unambiguous in deep threads. Set `omit_signature:
+    /// true` only in unusual circumstances.
+    ///
     /// Server constraints:
     ///   - The proposal must be live and within its vote cycle's
     ///     `feedbackEndDate`.
-    ///   - Content max 2000 chars; duplicates of recent comments are rejected.
+    ///   - `content + signature` max 2000 chars; duplicates of recent
+    ///     comments are rejected.
     ///   - Rate limit: 5 / min, 20 / hour per user.
     ///
-    /// The agent should always draft the comment in chat, get the user's
-    /// explicit approval, and then call this tool. The `destructiveHint`
-    /// annotation causes MCP clients (e.g. Claude Code) to prompt the user
-    /// before invocation as a second safety net.
+    /// The agent should draft the comment in chat, get the user's explicit
+    /// approval, and then call this tool. The `destructiveHint` annotation
+    /// causes MCP clients (e.g. Claude Code) to prompt the user before
+    /// invocation as a second safety net.
     #[tool(
         name = "create_comment",
         annotations(
@@ -688,17 +705,38 @@ impl ConcordanceServer {
         &self,
         Parameters(args): Parameters<CreateCommentArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        if args.content.is_empty() {
+        if args.content.trim().is_empty() {
             return Err(ErrorData::invalid_params(
                 "content cannot be empty".to_string(),
                 None,
             ));
         }
-        if args.content.chars().count() > 2000 {
+
+        // Build the final content the server will see — with signature
+        // unless explicitly suppressed.
+        let final_content = if args.omit_signature {
+            args.content.clone()
+        } else {
+            let id = Identity::load().map_err(|e| {
+                ErrorData::invalid_params(
+                    format!(
+                        "{e}; or pass omit_signature: true to post unsigned (rarely correct)"
+                    ),
+                    None,
+                )
+            })?;
+            format!("{}{}", args.content, id.signature())
+        };
+
+        let total = final_content.chars().count();
+        if total > 2000 {
+            let signature_chars = total - args.content.chars().count();
             return Err(ErrorData::invalid_params(
                 format!(
-                    "content is {} chars; server limit is 2000",
-                    args.content.chars().count()
+                    "content + signature is {total} chars; server limit is 2000. \
+                     Signature takes {signature_chars} chars; trim content by at \
+                     least {} chars or pass omit_signature: true (not recommended).",
+                    total - 2000
                 ),
                 None,
             ));
@@ -709,7 +747,7 @@ impl ConcordanceServer {
 
         let req = CreateCommentRequest {
             proposal_id: args.proposal_id,
-            content: args.content,
+            content: final_content,
             parent_id: args.parent_id,
         };
         let result = client
