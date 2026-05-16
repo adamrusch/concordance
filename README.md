@@ -17,9 +17,11 @@
 
 ## What is this?
 
-The Cardano community runs binding governance votes on-chain. Before a proposal reaches that stage, though, there's usually a **consensus-building phase** off-chain — drafting, discussion, public feedback, revision. For two of the biggest processes happening in Cardano right now — the **Intersect Budget Process** and the **election of a slate of nominees for the upcoming Constitutional Committee update** — that consensus-building phase is being **facilitated by Intersect MBO** on a platform called **Hydra Voting**, built on the open-source **Ekklesia** stack. Anyone with a Cardano wallet can read proposals there. Anyone with a wallet can post comments. Once a proposal has the support it needs, Intersect MBO takes the result on-chain for a formal Cardano governance vote.
+Hydra Voting hosts dozens of proposals at a time, each with its own document, comment thread, and metadata. Reading carefully through them — let alone drafting considered feedback — is friction-heavy work in a web UI: scroll the list, open a proposal, read the full document, scroll the comments, switch tabs to take notes, then come back to draft a reply.
 
-The web UI works fine, but it's a lot of clicking: you scroll dozens of proposals, open each one, read the full document, scroll the comment thread, then draft a reply by hand.
+Concordance is a client tool that puts that same work in front of an AI assistant. You ask Claude — or another capable LLM — to pull the proposals you care about, help you analyze them, surface the points worth responding to, and draft a reply you can edit before sending. When you've approved the draft, the assistant submits it through Concordance. Every comment carries an automatic signature linking it to the X and Cardano Forum identities you established during onboarding, so other community members can verify who you are.
+
+Concordance is just the input layer: it does not decide policy, it stores your credentials and identity only on your local machine, and it doesn't replace the on-chain governance vote that comes after this consensus-building phase. Hydra Voting remains the system of record; Concordance is a way to participate in it more comfortably.
 
 Concordance changes the input method. Instead of clicking through the web UI, you **talk to an AI assistant**. The assistant uses Concordance to fetch proposals, render comment threads in a form it can summarize, and — when you OK the draft — submit your comment on your behalf.
 
