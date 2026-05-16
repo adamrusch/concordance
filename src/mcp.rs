@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    api::{Comment, Vote},
+    api::{Comment, CreateCommentRequest, Vote},
     auth::{inspect_jwt, require_valid_jwt},
     client::EkklesiaClient,
     error::Error,
@@ -176,6 +176,21 @@ pub struct GetProposalArgs {
 pub struct RenderProposalMarkdownArgs {
     /// Proposal id (24-hex).
     pub proposal_id: String,
+    /// Instance name. Omit to use the configured default instance.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateCommentArgs {
+    /// Proposal id (24-hex) to comment on. The proposal must be live and
+    /// within its vote cycle's feedback window.
+    pub proposal_id: String,
+    /// Comment body. Max 2000 characters server-side. Markdown is accepted.
+    pub content: String,
+    /// Optional id of a comment to reply to. Omit for a top-level comment.
+    #[serde(default)]
+    pub parent_id: Option<String>,
     /// Instance name. Omit to use the configured default instance.
     #[serde(default)]
     pub instance: Option<String>,
@@ -472,6 +487,64 @@ impl ConcordanceServer {
             "comment_count_fetched": comments.len(),
             "comments": comments,
         }))
+    }
+
+    /// Post a comment on a proposal. The comment is public and irreversible
+    /// by non-admin users (the 15-minute server-side edit window allows typo
+    /// fixes via `update_comment`, but withdraw is admin-only).
+    ///
+    /// Server constraints:
+    ///   - The proposal must be live and within its vote cycle's
+    ///     `feedbackEndDate`.
+    ///   - Content max 2000 chars; duplicates of recent comments are rejected.
+    ///   - Rate limit: 5 / min, 20 / hour per user.
+    ///
+    /// The agent should always draft the comment in chat, get the user's
+    /// explicit approval, and then call this tool. The `destructiveHint`
+    /// annotation causes MCP clients (e.g. Claude Code) to prompt the user
+    /// before invocation as a second safety net.
+    #[tool(
+        name = "create_comment",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true,
+        )
+    )]
+    async fn create_comment(
+        &self,
+        Parameters(args): Parameters<CreateCommentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if args.content.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "content cannot be empty".to_string(),
+                None,
+            ));
+        }
+        if args.content.chars().count() > 2000 {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "content is {} chars; server limit is 2000",
+                    args.content.chars().count()
+                ),
+                None,
+            ));
+        }
+
+        let instance = self.resolve_instance(args.instance)?;
+        let client = self.make_client(&instance)?;
+
+        let req = CreateCommentRequest {
+            proposal_id: args.proposal_id,
+            content: args.content,
+            parent_id: args.parent_id,
+        };
+        let result = client
+            .create_comment(&req)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        json_result(result)
     }
 }
 
