@@ -45,10 +45,12 @@ field. For the user-facing setup flow, see
 
 | | |
 |---|---|
-| **Args** | `vote_id`, `status?` (`live\|draft\|withdrawn\|all`, default `live`), `search?` (substring match on title/summary), `page?` (default `1`), `limit?` (default `20`), `instance?` |
+| **Args** | `vote_id`, `status?` (`live\|withdrawn\|all`, default `live`), `page?` (default `1`), `limit?` (default `20`), `instance?` |
 | **Annotations** | `readOnlyHint`, `idempotentHint` |
 | **Returns** | `{data: [{id, title, summary, status, proposer, version, comment_count, submitted_at}], meta: {page, limit, total, total_pages, has_next_page}}` |
-| **Why** | Bulk browse with the filters today's CLI lacks. `status` and `search` are MVP-critical for cycles with many proposals (Budget 2026 has dozens). |
+| **Why** | Bulk browse with a status filter — useful for cycles with many proposals (Budget 2026 has 69). `draft` is admin/owner-only on the server and is omitted from the user-facing enum. |
+
+> **Deferred to v0.2.1:** the `search?` param (substring match) and the `category?` filter (which maps to vote-specific `metaData.strategyFramework.pillars` and would let an agent filter for, e.g., a specific strategic pillar). Empirical probing showed the obvious `?search=` and `?query=` URL params don't filter on hydra-voting; the search transport needs more investigation before we expose it as a tool arg.
 
 ### `get_proposal`
 

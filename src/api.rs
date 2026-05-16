@@ -9,13 +9,13 @@ use serde_json::Value;
 
 // ── Pagination ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Page<T> {
     pub data: Vec<T>,
     pub meta: PageMeta,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageMeta {
     pub page: u32,
@@ -29,7 +29,7 @@ pub struct PageMeta {
 
 // ── Votes ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Vote {
     #[serde(rename = "_id")]
@@ -55,7 +55,7 @@ pub struct Vote {
 
 // ── Proposals ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Proposal {
     #[serde(rename = "_id")]

@@ -61,14 +61,19 @@ impl EkklesiaClient {
     pub async fn list_proposals(
         &self,
         vote_id: &str,
+        status: Option<&str>,
         page: u32,
         limit: u32,
     ) -> Result<Page<Proposal>> {
-        self.get(&format!(
+        let mut url = format!(
             "{}/api/v0/proposals?vote={vote_id}&page={page}&limit={limit}",
             self.base_url
-        ))
-        .await
+        );
+        if let Some(s) = status {
+            url.push_str("&status=");
+            url.push_str(s);
+        }
+        self.get(&url).await
     }
 
     pub async fn get_proposal(&self, id: &str) -> Result<Proposal> {
