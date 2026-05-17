@@ -294,6 +294,7 @@ fn handle_auth(store: &Store, instance: Option<String>, cmd: AuthCmd) -> anyhow:
 ///   2. `--jwt -`                  — read stdin via `reader`, trim.
 ///   3. `--jwt <literal>`          — DEPRECATED; emits a stderr warning.
 ///   4. `$CONCORDANCE_JWT` env var — read and trim.
+///
 /// Errors with an actionable message if none of the above provide a token.
 ///
 /// The `reader` parameter is injected so the unit tests can exercise the
