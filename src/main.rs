@@ -156,6 +156,11 @@ enum CommentsCmd {
         message: String,
         #[arg(long, help = "Reply to this comment ID")]
         parent: Option<String>,
+        #[arg(
+            long,
+            help = "Post without appending your Concordance signature (rarely correct)"
+        )]
+        omit_signature: bool,
     },
 }
 
@@ -460,11 +465,15 @@ async fn handle_comments(
             proposal,
             message,
             parent,
+            omit_signature,
         } => {
             use concordance::api::CreateCommentRequest;
+            use concordance::identity::prepare_comment_content;
+            let content =
+                prepare_comment_content(&message, omit_signature, "--omit-signature")?;
             let req = CreateCommentRequest {
                 proposal_id: proposal,
-                content: message,
+                content,
                 parent_id: parent,
             };
             let result = client.create_comment(&req).await?;
