@@ -71,16 +71,26 @@ Tell Claude: *"I'm signed in to Hydra-Voting."*
 
 ## Step 3 — Copy your `token` cookie
 
-The cookie is `HttpOnly`, so the JavaScript console can't read it. You need
-DevTools' storage view.
+The cookie is `HttpOnly`, so the JavaScript console can't read it and we
+can't ship a bookmarklet that prints it for you. You have to grab it out
+of DevTools.
+
+> **Heads-up: this is the most awkward step.** Three different browsers
+> use three different DevTools paths, and Chromium's cookie inspector
+> sometimes truncates the value if you single-click instead of
+> double-click. The single-paragraph fix exists per browser below; if
+> you get a token shorter than ~300 characters, jump to the
+> [troubleshooting](#troubleshooting) section.
 
 **Chrome / Edge / Brave / Arc:**
 
 1. Press `Cmd+Option+I` (macOS) or `Ctrl+Shift+I` (Windows/Linux).
 2. Click the **Application** tab. (Use the `»` overflow menu if it's hidden.)
 3. Left sidebar: **Storage → Cookies → `https://hydra-voting.intersectmbo.org`**.
-4. Find the row where **Name** is `token`. Double-click its **Value** cell —
-   it expands to a long string with three dot-separated segments.
+4. Find the row where **Name** is `token`. **Double-click** its **Value**
+   cell — it expands to a long string with three dot-separated segments.
+   (A single click truncates the display; double-clicking expands it for
+   real.)
 5. `Cmd+A`, `Cmd+C`. Expect roughly 300–1500 characters.
 
 **Firefox:**
@@ -94,40 +104,39 @@ DevTools' storage view.
 2. `Cmd+Option+I` → **Storage** → **Cookies → hydra-voting.intersectmbo.org**.
 3. Copy the **Value** column for the `token` row.
 
+> **Why is there no one-click flow?** The token cookie is `HttpOnly`, so
+> JavaScript on the page can't read it — a bookmarklet that prints the
+> token is impossible client-side. A proper one-click flow (OAuth-style
+> loopback callback, or a server-rendered "show my CLI token" page) is
+> tracked in [issue #3](https://github.com/adamrusch/concordance/issues/3);
+> both options need a small endpoint on the Hydra Voting side, so they
+> have to land server-side first.
+
 ### Security note
 
-The `token` is bearer-equivalent — anyone who has it can act as you on the
-platform until it expires (typically ~24 hours). Two safer options if you
-don't want to paste it directly into chat:
+The `token` is bearer-equivalent — anyone who has it can act as you on
+the platform until it expires (typically ~24 hours). Three ways to keep
+it off shell history and out of `ps`:
+
+| Path | Best for | How |
+|---|---|---|
+| **Pipe from clipboard** | Most users on the happy path | `pbpaste \| concordance auth set --jwt -` (macOS), `xclip -selection clipboard -o \| concordance auth set --jwt -` (X11), `wl-paste \| concordance auth set --jwt -` (Wayland). The shell records only the pipe command, not the token. |
+| **Read from file** | Already have the token in a secrets file (CI, GnuPG-decrypted snippet, etc.) | `concordance auth set --jwt-file /run/secrets/hydra-voting-jwt` |
+| **Environment variable** | You want to set once for the whole session, including the running MCP server | `export CONCORDANCE_JWT="$(pbpaste)" && concordance auth set` — `CONCORDANCE_JWT` is the same env var the MCP server already reads per-session, so this works even without writing to disk |
+
+Two safer options if you don't want to paste the token into chat at all:
 
 - **Type it into a local file yourself.** Ask Claude: *"I'd rather not
-  paste my JWT in chat — set up a local file route."* Claude will tell you
-  exactly what to write where, so the value never enters this conversation.
+  paste my JWT in chat — set up a local file route."* Claude will tell
+  you exactly what to write where, so the value never enters this
+  conversation. The `--jwt-file` or `CONCORDANCE_JWT` form then reads
+  it directly.
 - **Rotate after.** Log out of hydra-voting.intersectmbo.org when you're
   done. That invalidates the token.
 
-If you're fine pasting it for this session, send it to Claude as your next
-message.
-
-> **How Claude stores the token without leaking it to shell history.**
-> Claude does **not** invoke `concordance auth set --jwt '<token>'` directly
-> — that form writes the JWT into your shell history file and exposes it
-> in `ps`. Instead Claude pipes the token in:
->
-> ```sh
-> # macOS
-> pbpaste | concordance auth set --jwt -
-> # Linux (X11)
-> xclip -selection clipboard -o | concordance auth set --jwt -
-> # Linux (Wayland)
-> wl-paste | concordance auth set --jwt -
-> ```
->
-> The shell history records only the pipe command, not the token. Other
-> supported forms: `--jwt-file <path>` (read from a file) and the
-> `CONCORDANCE_JWT` environment variable. The literal `--jwt <token>` form
-> still works for backwards compatibility but emits a deprecation warning
-> on stderr; it will be removed in a future release.
+> The `--jwt <literal>` form still works for backwards compatibility
+> but emits a deprecation warning on stderr; it writes the token to
+> your shell history file. Removed in a future release.
 
 ## Step 4 — Claude configures Concordance
 
@@ -207,8 +216,19 @@ just on the landing page) and that you've clicked the cookie scope for
 `https://hydra-voting.intersectmbo.org` specifically.
 
 **Token is short / only one segment when pasted** — DevTools sometimes
-truncates when you single-click instead of double-click the cell.
-Double-click to expand, then `Cmd+A` to select the whole value.
+truncates the displayed value when you single-click the cell. A real JWT
+is three dot-separated segments (`header.payload.signature`) and 300–1500
+characters total. Fix: double-click the **Value** cell to expand it,
+*then* `Cmd+A` and `Cmd+C`. If you see "JWT invalid: expected 3
+dot-separated parts" from `auth set`, that's the truncation symptom.
+
+**`error: store error: ... WouldBlock`** — fixed in v0.3.2; if you still
+see it, you're on an older build. Pull, `cargo build --release`, retry.
+
+**`error: concordance is already running with the database open`** — also
+fixed in v0.3.2 (CLI and MCP server share the on-disk store cleanly). If
+you see this, you're on a build between v0.3.1 and v0.3.2: quit Claude
+Code or `pkill -f 'concordance mcp'` and retry while you upgrade.
 
 ## What's in the repo for this flow
 
