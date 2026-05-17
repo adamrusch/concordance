@@ -82,10 +82,27 @@ enum InstancesCmd {
 
 #[derive(Subcommand)]
 enum AuthCmd {
-    /// Store a JWT token for an instance (get it from the browser cookie named 'token')
+    /// Store a JWT token for an instance (get it from the browser cookie named 'token').
+    ///
+    /// Token source resolution (first match wins):
+    ///   --jwt-file <path>  read from file (trimmed)
+    ///   --jwt -            read from stdin (trimmed)
+    ///   $CONCORDANCE_JWT   read from environment
+    ///   --jwt <literal>    DEPRECATED: leaks into shell history and `ps`
+    ///
+    /// Examples:
+    ///   pbpaste | concordance auth set --jwt -
+    ///   CONCORDANCE_JWT="$(pbpaste)" concordance auth set
+    ///   concordance auth set --jwt-file /run/secrets/hydra-voting-jwt
     Set {
-        #[arg(long)]
-        jwt: String,
+        /// JWT value, or `-` to read from stdin. Passing the token literally
+        /// is deprecated — it writes the token to shell history and exposes
+        /// it in `ps`. Use `-` to read stdin or `--jwt-file` instead.
+        #[arg(long, value_name = "TOKEN_OR_DASH")]
+        jwt: Option<String>,
+        /// Path to a file containing the JWT (trimmed). Conflicts with `--jwt`.
+        #[arg(long, value_name = "PATH", conflicts_with = "jwt")]
+        jwt_file: Option<PathBuf>,
     },
     /// Show token status for an instance
     Status,
@@ -234,7 +251,8 @@ fn handle_instances(store: &Store, cmd: InstancesCmd) -> anyhow::Result<()> {
 fn handle_auth(store: &Store, instance: Option<String>, cmd: AuthCmd) -> anyhow::Result<()> {
     let name = resolve_instance(store, instance.as_deref())?;
     match cmd {
-        AuthCmd::Set { jwt } => {
+        AuthCmd::Set { jwt, jwt_file } => {
+            let jwt = resolve_jwt_input(jwt, jwt_file, &mut std::io::stdin().lock())?;
             inspect_jwt(&jwt)?; // validate it's a real JWT before storing
             store.set_token(&name, &jwt)?;
             println!("Token stored for '{name}'");
@@ -250,6 +268,64 @@ fn handle_auth(store: &Store, instance: Option<String>, cmd: AuthCmd) -> anyhow:
         }
     }
     Ok(())
+}
+
+/// Resolve the JWT to store from the available input sources.
+///
+/// Precedence (first match wins):
+///   1. `--jwt-file <path>`        — read file, trim trailing whitespace.
+///   2. `--jwt -`                  — read stdin via `reader`, trim.
+///   3. `--jwt <literal>`          — DEPRECATED; emits a stderr warning.
+///   4. `$CONCORDANCE_JWT` env var — read and trim.
+/// Errors with an actionable message if none of the above provide a token.
+///
+/// The `reader` parameter is injected so the unit tests can exercise the
+/// stdin path without touching the real stdin handle.
+fn resolve_jwt_input(
+    jwt: Option<String>,
+    jwt_file: Option<PathBuf>,
+    reader: &mut dyn std::io::Read,
+) -> anyhow::Result<String> {
+    if let Some(path) = jwt_file {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("failed to read JWT file {}: {e}", path.display()))?;
+        let trimmed = contents.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("JWT file {} is empty", path.display());
+        }
+        return Ok(trimmed.to_string());
+    }
+    if let Some(raw) = jwt {
+        if raw == "-" {
+            let mut buf = String::new();
+            reader.read_to_string(&mut buf)?;
+            let trimmed = buf.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("no JWT received on stdin");
+            }
+            return Ok(trimmed.to_string());
+        }
+        // Deprecated literal-on-argv path.
+        eprintln!(
+            "warning: passing the JWT on the command line writes it to shell\n         \
+             history and exposes it in `ps`. Use `--jwt -` to read from\n         \
+             stdin instead, `--jwt-file <path>` to read from a file, or\n         \
+             set $CONCORDANCE_JWT in the environment."
+        );
+        return Ok(raw);
+    }
+    if let Ok(val) = std::env::var("CONCORDANCE_JWT") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    anyhow::bail!(
+        "no JWT provided. Supply one via:\n  \
+         --jwt-file <path>   (read from file)\n  \
+         --jwt -             (read from stdin: e.g. `pbpaste | concordance auth set --jwt -`)\n  \
+         CONCORDANCE_JWT     (environment variable)"
+    )
 }
 
 async fn handle_votes(client: &EkklesiaClient, instance: &str, limit: u32) -> anyhow::Result<()> {
@@ -445,4 +521,154 @@ fn format_ada(n: u64) -> String {
         out.push(ch);
     }
     out.chars().rev().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use tempfile::NamedTempFile;
+
+    /// Tests for `resolve_jwt_input` — the JWT source-resolution helper that
+    /// implements the security contract for issue #5. The test names encode
+    /// the precedence order: jwt_file > stdin > literal-with-deprecation >
+    /// CONCORDANCE_JWT env > error.
+    ///
+    /// The `CONCORDANCE_JWT` cases set and clear the env var under a single
+    /// process-wide mutex because cargo runs tests in parallel; a leaked env
+    /// var would taint sibling tests. Tests that don't need it call
+    /// `clear_env` defensively at the top.
+
+    use std::sync::Mutex;
+    static ENV_MU: Mutex<()> = Mutex::new(());
+    const ENV_VAR: &str = "CONCORDANCE_JWT";
+
+    fn clear_env() {
+        // SAFETY: protected by ENV_MU at every call site that runs in this
+        // test module. Env modification is process-global; the mutex
+        // serialises tests that touch it.
+        unsafe {
+            std::env::remove_var(ENV_VAR);
+        }
+    }
+
+    fn set_env(value: &str) {
+        unsafe {
+            std::env::set_var(ENV_VAR, value);
+        }
+    }
+
+    #[test]
+    fn jwt_file_wins_over_env() {
+        let _g = ENV_MU.lock().unwrap();
+        set_env("from-env");
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), "from-file\n").unwrap();
+        let got = resolve_jwt_input(None, Some(f.path().to_path_buf()), &mut Cursor::new(""))
+            .unwrap();
+        assert_eq!(got, "from-file");
+        clear_env();
+    }
+
+    #[test]
+    fn stdin_dash_wins_over_env() {
+        let _g = ENV_MU.lock().unwrap();
+        set_env("from-env");
+        let got = resolve_jwt_input(
+            Some("-".to_string()),
+            None,
+            &mut Cursor::new("from-stdin\n"),
+        )
+        .unwrap();
+        assert_eq!(got, "from-stdin");
+        clear_env();
+    }
+
+    #[test]
+    fn literal_jwt_wins_over_env_but_warns() {
+        let _g = ENV_MU.lock().unwrap();
+        set_env("from-env");
+        // The deprecation warning goes to stderr; the test confirms the
+        // literal value is still used (the warn-and-store path is the
+        // documented 0.3 migration behaviour).
+        let got = resolve_jwt_input(Some("literal-token".to_string()), None, &mut Cursor::new(""))
+            .unwrap();
+        assert_eq!(got, "literal-token");
+        clear_env();
+    }
+
+    #[test]
+    fn env_used_when_no_flags_provided() {
+        let _g = ENV_MU.lock().unwrap();
+        set_env("from-env");
+        let got = resolve_jwt_input(None, None, &mut Cursor::new("")).unwrap();
+        assert_eq!(got, "from-env");
+        clear_env();
+    }
+
+    #[test]
+    fn no_sources_errors_with_actionable_message() {
+        let _g = ENV_MU.lock().unwrap();
+        clear_env();
+        let err = resolve_jwt_input(None, None, &mut Cursor::new("")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--jwt-file"), "missing --jwt-file hint: {msg}");
+        assert!(msg.contains("--jwt -"), "missing --jwt - hint: {msg}");
+        assert!(msg.contains("CONCORDANCE_JWT"), "missing env hint: {msg}");
+    }
+
+    #[test]
+    fn stdin_trims_trailing_whitespace_and_newline() {
+        let _g = ENV_MU.lock().unwrap();
+        clear_env();
+        let got = resolve_jwt_input(
+            Some("-".to_string()),
+            None,
+            &mut Cursor::new("  jwt-value  \n\n"),
+        )
+        .unwrap();
+        assert_eq!(got, "jwt-value");
+    }
+
+    #[test]
+    fn jwt_file_trims_trailing_whitespace_and_newline() {
+        let _g = ENV_MU.lock().unwrap();
+        clear_env();
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), "jwt-value\n").unwrap();
+        let got =
+            resolve_jwt_input(None, Some(f.path().to_path_buf()), &mut Cursor::new("")).unwrap();
+        assert_eq!(got, "jwt-value");
+    }
+
+    #[test]
+    fn empty_stdin_with_dash_errors() {
+        let _g = ENV_MU.lock().unwrap();
+        clear_env();
+        let err =
+            resolve_jwt_input(Some("-".to_string()), None, &mut Cursor::new("   \n")).unwrap_err();
+        assert!(err.to_string().contains("stdin"), "msg: {err}");
+    }
+
+    #[test]
+    fn empty_jwt_file_errors() {
+        let _g = ENV_MU.lock().unwrap();
+        clear_env();
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), "   \n").unwrap();
+        let err =
+            resolve_jwt_input(None, Some(f.path().to_path_buf()), &mut Cursor::new("")).unwrap_err();
+        assert!(err.to_string().contains("empty"), "msg: {err}");
+    }
+
+    #[test]
+    fn empty_env_falls_through_to_error() {
+        let _g = ENV_MU.lock().unwrap();
+        set_env("   ");
+        let err = resolve_jwt_input(None, None, &mut Cursor::new("")).unwrap_err();
+        // Empty/whitespace env is treated as "not provided" so the user
+        // gets the full hints message rather than a silent success.
+        assert!(err.to_string().contains("--jwt-file"));
+        clear_env();
+    }
 }

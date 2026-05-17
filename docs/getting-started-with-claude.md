@@ -109,6 +109,26 @@ don't want to paste it directly into chat:
 If you're fine pasting it for this session, send it to Claude as your next
 message.
 
+> **How Claude stores the token without leaking it to shell history.**
+> Claude does **not** invoke `concordance auth set --jwt '<token>'` directly
+> — that form writes the JWT into your shell history file and exposes it
+> in `ps`. Instead Claude pipes the token in:
+>
+> ```sh
+> # macOS
+> pbpaste | concordance auth set --jwt -
+> # Linux (X11)
+> xclip -selection clipboard -o | concordance auth set --jwt -
+> # Linux (Wayland)
+> wl-paste | concordance auth set --jwt -
+> ```
+>
+> The shell history records only the pipe command, not the token. Other
+> supported forms: `--jwt-file <path>` (read from a file) and the
+> `CONCORDANCE_JWT` environment variable. The literal `--jwt <token>` form
+> still works for backwards compatibility but emits a deprecation warning
+> on stderr; it will be removed in a future release.
+
 ## Step 4 — Claude configures Concordance
 
 Once you've pasted the token, Claude will:
@@ -116,7 +136,9 @@ Once you've pasted the token, Claude will:
 1. Build Concordance if it's not already built (`cargo build --release` —
    first build takes a few minutes; subsequent runs are instant).
 2. Register the Intersect Hydra Voting instance.
-3. Store your token.
+3. Store your token. Claude pipes the JWT into `concordance auth set
+   --jwt -` (reading from stdin) so the token never appears in your shell
+   history or in `ps` output.
 4. Verify the token is valid (`auth_status` shows time-to-expiry and the
    stake address that signed it).
 5. **Link the stake address** to your identity file from Step 1
