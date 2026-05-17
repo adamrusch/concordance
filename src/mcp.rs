@@ -23,7 +23,7 @@ use crate::{
     auth::{inspect_jwt, require_valid_jwt},
     client::EkklesiaClient,
     error::Error,
-    identity::Identity,
+    identity::{Identity, prepare_comment_content},
     render::render_proposal_md,
     store::Store,
 };
@@ -705,42 +705,15 @@ impl ConcordanceServer {
         &self,
         Parameters(args): Parameters<CreateCommentArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        if args.content.trim().is_empty() {
-            return Err(ErrorData::invalid_params(
-                "content cannot be empty".to_string(),
-                None,
-            ));
-        }
-
         // Build the final content the server will see — with signature
-        // unless explicitly suppressed.
-        let final_content = if args.omit_signature {
-            args.content.clone()
-        } else {
-            let id = Identity::load().map_err(|e| {
-                ErrorData::invalid_params(
-                    format!(
-                        "{e}; or pass omit_signature: true to post unsigned (rarely correct)"
-                    ),
-                    None,
-                )
-            })?;
-            format!("{}{}", args.content, id.signature())
-        };
-
-        let total = final_content.chars().count();
-        if total > 2000 {
-            let signature_chars = total - args.content.chars().count();
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "content + signature is {total} chars; server limit is 2000. \
-                     Signature takes {signature_chars} chars; trim content by at \
-                     least {} chars or pass omit_signature: true (not recommended).",
-                    total - 2000
-                ),
-                None,
-            ));
-        }
+        // unless explicitly suppressed. Shared with the `comments add` CLI
+        // path via `prepare_comment_content` so both honor the same contract.
+        let final_content = prepare_comment_content(
+            &args.content,
+            args.omit_signature,
+            "omit_signature: true",
+        )
+        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
 
         let instance = self.resolve_instance(args.instance)?;
         let client = self.make_client(&instance)?;

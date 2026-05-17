@@ -124,6 +124,67 @@ impl Identity {
     }
 }
 
+/// Hydra-Voting's hard cap on `create_comment` content length, in characters.
+pub const COMMENT_MAX_CHARS: usize = 2000;
+
+/// Build the final comment content to send to Hydra-Voting: append the
+/// signature (unless explicitly suppressed) and enforce the server's
+/// 2000-character limit. Shared between the MCP `create_comment` tool and
+/// the `comments add` CLI subcommand so both call paths honor the same
+/// signature contract.
+///
+/// `bypass_hint` is the caller's own opt-out spelling — `"omit_signature:
+/// true"` for the MCP tool, `"--omit-signature"` for the CLI — and is
+/// interpolated into the error messages so the user is pointed at the
+/// right escape hatch for the surface they're using.
+pub fn prepare_comment_content(
+    content: &str,
+    omit_signature: bool,
+    bypass_hint: &str,
+) -> Result<String> {
+    let identity = if omit_signature {
+        None
+    } else {
+        Some(Identity::load().map_err(|e| {
+            Error::Parse(format!(
+                "{e}; or pass {bypass_hint} to post unsigned (rarely correct)"
+            ))
+        })?)
+    };
+    finalize_comment_content(content, identity.as_ref(), bypass_hint)
+}
+
+/// Pure inner step of [`prepare_comment_content`]: append the (already-
+/// loaded) signature and enforce the length limit. Split out so tests can
+/// inject a fixture identity without going through disk.
+fn finalize_comment_content(
+    content: &str,
+    identity: Option<&Identity>,
+    bypass_hint: &str,
+) -> Result<String> {
+    if content.trim().is_empty() {
+        return Err(Error::Parse("content cannot be empty".to_string()));
+    }
+
+    let final_content = match identity {
+        Some(id) => format!("{}{}", content, id.signature()),
+        None => content.to_string(),
+    };
+
+    let total = final_content.chars().count();
+    if total > COMMENT_MAX_CHARS {
+        let signature_chars = total - content.chars().count();
+        return Err(Error::Parse(format!(
+            "content + signature is {total} chars; server limit is {COMMENT_MAX_CHARS}. \
+             Signature takes {signature_chars} chars; trim content by at \
+             least {} chars or pass {bypass_hint} (not recommended).",
+            total - COMMENT_MAX_CHARS
+        )));
+    }
+
+    Ok(final_content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +283,107 @@ mod tests {
         assert!(raw.contains("x_handle = "));
         assert!(raw.contains("cardano_forum_name = "));
         assert!(raw.contains("stake_address = "));
+    }
+
+    // ── prepare_comment_content ───────────────────────────────────────────
+
+    #[test]
+    fn prepare_rejects_empty_content() {
+        let err = prepare_comment_content("", true, "--omit-signature").unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn prepare_rejects_whitespace_only_content() {
+        let err = prepare_comment_content("   \n\t  ", true, "--omit-signature").unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn prepare_with_omit_returns_content_unchanged() {
+        let out = prepare_comment_content("hello", true, "--omit-signature").unwrap();
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn prepare_enforces_2000_char_limit() {
+        let content = "x".repeat(COMMENT_MAX_CHARS + 1);
+        let err = prepare_comment_content(&content, true, "--omit-signature").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server limit is 2000"));
+        assert!(msg.contains("--omit-signature"));
+    }
+
+    #[test]
+    fn prepare_over_limit_uses_caller_supplied_bypass_hint() {
+        // Two callers, two different hint phrasings — error message must
+        // reflect whichever the caller passed so the user sees the right
+        // escape hatch for the surface they're on.
+        let content = "x".repeat(COMMENT_MAX_CHARS + 1);
+        let cli_err =
+            prepare_comment_content(&content, true, "--omit-signature").unwrap_err();
+        assert!(cli_err.to_string().contains("--omit-signature"));
+        assert!(!cli_err.to_string().contains("omit_signature: true"));
+
+        let mcp_err =
+            prepare_comment_content(&content, true, "omit_signature: true").unwrap_err();
+        assert!(mcp_err.to_string().contains("omit_signature: true"));
+        assert!(!mcp_err.to_string().contains("--omit-signature"));
+    }
+
+    #[test]
+    fn prepare_at_limit_succeeds() {
+        let content = "x".repeat(COMMENT_MAX_CHARS);
+        let out = prepare_comment_content(&content, true, "--omit-signature").unwrap();
+        assert_eq!(out.chars().count(), COMMENT_MAX_CHARS);
+    }
+
+    // ── finalize_comment_content (signature-appending branch) ─────────────
+    //
+    // `prepare_comment_content` calls `Identity::load()` from disk, which we
+    // don't want unit tests to touch. `finalize_comment_content` is the
+    // pure inner step that both the CLI and MCP call paths reach via
+    // `prepare_comment_content`, so exercising it covers the shared
+    // signature contract for both surfaces.
+
+    #[test]
+    fn finalize_appends_signature_when_identity_present() {
+        let id = sample(None);
+        let out = finalize_comment_content("hello", Some(&id), "--omit-signature").unwrap();
+        assert!(out.starts_with("hello"));
+        assert!(out.ends_with("via Concordance Feedback Tool"));
+        assert_eq!(out, format!("hello{}", id.signature()));
+    }
+
+    #[test]
+    fn finalize_with_no_identity_returns_content_unchanged() {
+        // Mirrors `omit_signature: true` — no signature appended.
+        let out = finalize_comment_content("hello", None, "--omit-signature").unwrap();
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn finalize_enforces_2000_chars_with_signature_included() {
+        // Content that's under 2000 chars on its own but tips over once the
+        // signature is appended must be rejected — this is the gap the
+        // pre-helper CLI had: it sent oversized content straight to the
+        // server.
+        let id = sample(None);
+        let sig_len = id.signature().chars().count();
+        let content = "x".repeat(COMMENT_MAX_CHARS - sig_len + 1);
+        let err = finalize_comment_content(&content, Some(&id), "--omit-signature").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server limit is 2000"), "got: {msg}");
+        assert!(msg.contains("--omit-signature"), "got: {msg}");
+    }
+
+    #[test]
+    fn finalize_signature_path_just_fits_at_limit() {
+        let id = sample(None);
+        let sig_len = id.signature().chars().count();
+        let content = "x".repeat(COMMENT_MAX_CHARS - sig_len);
+        let out = finalize_comment_content(&content, Some(&id), "--omit-signature").unwrap();
+        assert_eq!(out.chars().count(), COMMENT_MAX_CHARS);
     }
 
     #[test]
