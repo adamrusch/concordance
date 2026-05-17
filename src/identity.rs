@@ -87,12 +87,18 @@ impl Identity {
     }
 
     /// The signature block appended to every Hydra-Voting comment posted via
-    /// Concordance. The leading `-- ` is a long-standing email/Usenet
+    /// Concordance. The leading `--` is a long-standing email/Usenet
     /// convention indicating a signature delimiter; we keep that for
     /// readability and tool-friendly parsing.
+    ///
+    /// Each non-final line ends with two trailing spaces — CommonMark's
+    /// hard-line-break syntax — so the signature renders as five stacked
+    /// rows in Hydra-Voting's Markdown renderer. Without the trailing
+    /// spaces, single `\n` newlines collapse to a single space inside a
+    /// paragraph, which made the signature show as one run-on line.
     pub fn signature(&self) -> String {
         format!(
-            "\n\n--\n{}\nX Handle: @{}\nCardano Forum: {}\nvia Concordance Feedback Tool",
+            "\n\n--  \n{}  \nX Handle: @{}  \nCardano Forum: {}  \nvia Concordance Feedback Tool",
             self.name, self.x_handle, self.cardano_forum_name,
         )
     }
@@ -166,8 +172,24 @@ mod tests {
         let sig = id.signature();
         assert_eq!(
             sig,
-            "\n\n--\nAdam Rusch\nX Handle: @adamrusch\nCardano Forum: adam_rusch\nvia Concordance Feedback Tool"
+            "\n\n--  \nAdam Rusch  \nX Handle: @adamrusch  \nCardano Forum: adam_rusch  \nvia Concordance Feedback Tool"
         );
+    }
+
+    #[test]
+    fn signature_uses_markdown_hard_breaks_between_lines() {
+        // Two trailing spaces before each interior newline is the CommonMark
+        // hard-break syntax. Without this, Hydra-Voting's renderer collapses
+        // the five signature rows into one — confirmed empirically in May 2026.
+        let sig = sample(None).signature();
+        for line in ["--", "Adam Rusch", "X Handle: @adamrusch", "Cardano Forum: adam_rusch"] {
+            assert!(
+                sig.contains(&format!("{line}  \n")),
+                "signature line {line:?} should end with two trailing spaces"
+            );
+        }
+        // The final line must NOT have trailing spaces — nothing follows it.
+        assert!(sig.ends_with("via Concordance Feedback Tool"));
     }
 
     #[test]
