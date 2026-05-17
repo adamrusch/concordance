@@ -135,15 +135,15 @@ Once you've pasted the token, Claude will:
 
 1. Build Concordance if it's not already built (`cargo build --release` —
    first build takes a few minutes; subsequent runs are instant).
-2. Register the Intersect Hydra Voting instance.
-3. Store your token. Claude pipes the JWT into `concordance auth set
+2. Store your token. Claude pipes the JWT into `concordance auth set
    --jwt -` (reading from stdin) so the token never appears in your shell
-   history or in `ps` output.
-4. Verify the token is valid (`auth_status` shows time-to-expiry and the
+   history or in `ps` output. (As of v0.3.1, the Hydra Voting instance
+   URL ships with the binary — no separate `instances add` step needed.)
+3. Verify the token is valid (`auth_status` shows time-to-expiry and the
    stake address that signed it).
-5. **Link the stake address** to your identity file from Step 1
+4. **Link the stake address** to your identity file from Step 1
    (`link_stake_address`).
-6. Run a read smoke test (`list_votes` returns the active vote cycles
+5. Run a read smoke test (`list_votes` returns the active vote cycles
    with computed feedback-window state).
 
 ## Step 5 — Post a verification message on X or the Cardano Forum

@@ -16,12 +16,22 @@ pub enum Error {
     #[error("JWT invalid: {0}")]
     JwtInvalid(String),
 
-    #[error("no JWT configured for instance '{0}' — run: concordance auth set {0} --jwt <token>")]
+    #[error(
+        "no JWT configured for instance '{0}' — store one with:\n  \
+         pbpaste | concordance --instance {0} auth set --jwt -\n  \
+         or set $CONCORDANCE_JWT (env), or use `--jwt-file <path>`. See\n  \
+         `concordance auth set --help` for the full source-resolution list."
+    )]
     NoToken(String),
 
     #[error("instance '{0}' not found — run: concordance instances add <url> --name {0}")]
     UnknownInstance(String),
 
+    /// Kept for backwards compatibility; as of v0.3.1
+    /// `Store::default_instance` always resolves to the built-in fallback
+    /// when no DB pointer is set, so this variant is effectively unused
+    /// from inside the store itself. Other call sites may still produce
+    /// it in the future, so we keep the message accurate.
     #[error("no default instance configured — run: concordance instances add <url>")]
     NoDefaultInstance,
 

@@ -20,6 +20,12 @@ field. For the user-facing setup flow, see
   relevant.
 - **`instance?`** appears on every API-touching tool. When omitted, falls
   back to the configured default instance (matches the CLI's `-i` flag).
+  As of v0.3.1 the default resolves to a built-in fallback
+  (`hydra-voting.intersectmbo.org`) when no DB entry exists, so a fresh
+  install reaches Intersect MBO's Hydra Voting deployment with zero
+  `instances add` calls. The fallback lives in code, not the DB —
+  changing it is a release-level change, and users can't accidentally
+  remove it.
 
 ## Ship tiers
 

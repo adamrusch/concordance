@@ -15,6 +15,37 @@ const TOKENS_TREE: &str = "tokens";
 const META_TREE: &str = "meta";
 const DEFAULT_INSTANCE_KEY: &str = "default_instance";
 
+/// Name of the built-in default instance. Resolved as a code-level fallback
+/// by [`Store::default_instance`] and [`Store::get_instance`] when no DB
+/// record exists — see [`builtin_default`] for the full rationale.
+pub const BUILTIN_DEFAULT_NAME: &str = "hydra-voting.intersectmbo.org";
+
+/// URL the built-in default points to.
+pub const BUILTIN_DEFAULT_URL: &str = "https://hydra-voting.intersectmbo.org";
+
+/// Return the `InstanceConfig` for the built-in default — Intersect MBO's
+/// Hydra Voting deployment. The fallback is intentionally a function, not
+/// a `const`: `InstanceConfig` holds owned `String`s, which can't appear
+/// in a `const` context.
+///
+/// **Why a code-level fallback rather than auto-seeding the sled DB?**
+///
+/// - The URL ships with each release; changing it is a one-line code
+///   change, not a migration.
+/// - Users can't `instances remove` the built-in and end up unable to
+///   open the CLI — it's always available as a virtual fallback.
+/// - No risk of a stale URL persisting across upgrades if Hydra Voting
+///   ever changes its public hostname.
+/// - Anyone adding a real DB entry with the same name (intentional or
+///   accidental) takes precedence: the explicit DB entry wins over the
+///   code-level default. See `get_instance` for the lookup order.
+pub fn builtin_default() -> InstanceConfig {
+    InstanceConfig {
+        name: BUILTIN_DEFAULT_NAME.to_string(),
+        url: BUILTIN_DEFAULT_URL.to_string(),
+    }
+}
+
 /// Connection details for a single Ekklesia instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceConfig {
@@ -101,21 +132,55 @@ impl Store {
         Ok(())
     }
 
-    /// Retrieve a stored instance by name.
+    /// Retrieve an instance by name. Lookup order:
+    ///
+    /// 1. DB entry (an explicit `instances add` wins over the built-in).
+    /// 2. Built-in default — matched only when `name` is exactly
+    ///    [`BUILTIN_DEFAULT_NAME`].
+    /// 3. Otherwise `Error::UnknownInstance`.
+    ///
+    /// The fallback lets a fresh install reach Hydra Voting with zero
+    /// `instances add` calls, while still allowing testnet / staging
+    /// users to override by adding a DB entry with the same name.
     pub fn get_instance(&self, name: &str) -> Result<InstanceConfig> {
         let tree = self.db.open_tree(INSTANCES_TREE)?;
-        tree.get(name.as_bytes())?
-            .ok_or_else(|| Error::UnknownInstance(name.to_string()))
-            .and_then(|v| serde_json::from_slice(&v).map_err(Into::into))
+        if let Some(v) = tree.get(name.as_bytes())? {
+            return serde_json::from_slice(&v).map_err(Into::into);
+        }
+        if name == BUILTIN_DEFAULT_NAME {
+            return Ok(builtin_default());
+        }
+        Err(Error::UnknownInstance(name.to_string()))
     }
 
-    /// Return all stored instances in arbitrary order.
+    /// Return all configured instances in arbitrary order. The DB entries
+    /// take precedence; the built-in default is appended only if no DB
+    /// entry already uses [`BUILTIN_DEFAULT_NAME`] (so users who add an
+    /// explicit override see exactly their override, not two rows).
     pub fn list_instances(&self) -> Result<Vec<InstanceConfig>> {
         let tree = self.db.open_tree(INSTANCES_TREE)?;
-        tree.iter()
+        let mut out: Vec<InstanceConfig> = tree
+            .iter()
             .map(|r| {
                 let (_, v) = r?;
                 serde_json::from_slice(&v).map_err(Into::into)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !out.iter().any(|i| i.name == BUILTIN_DEFAULT_NAME) {
+            out.push(builtin_default());
+        }
+        Ok(out)
+    }
+
+    /// Return the names of instances that have an explicit DB entry
+    /// (i.e. excluding the built-in fallback). Used by the CLI to flag
+    /// which `instances list` rows are user-added vs. built-in.
+    pub fn list_db_instance_names(&self) -> Result<Vec<String>> {
+        let tree = self.db.open_tree(INSTANCES_TREE)?;
+        tree.iter()
+            .map(|r| {
+                let (k, _) = r?;
+                Ok(String::from_utf8_lossy(&k).to_string())
             })
             .collect()
     }
@@ -137,11 +202,24 @@ impl Store {
     }
 
     /// Return the name of the current default instance.
+    ///
+    /// Lookup order:
+    ///   1. The DB-level `default_instance` pointer (set by `instances
+    ///      add` on first add, or `instances default <name>` explicitly).
+    ///   2. [`BUILTIN_DEFAULT_NAME`] — the code-level fallback so a fresh
+    ///      install resolves to Hydra Voting without any setup.
+    ///
+    /// This method therefore never returns `Error::NoDefaultInstance`,
+    /// despite the variant being kept on `Error` for backwards
+    /// compatibility (it could still surface from other call sites in
+    /// the future). The error variant should be considered effectively
+    /// dead code as of v0.3.1.
     pub fn default_instance(&self) -> Result<String> {
         let meta = self.db.open_tree(META_TREE)?;
-        meta.get(DEFAULT_INSTANCE_KEY)?
-            .ok_or(Error::NoDefaultInstance)
-            .map(|v| String::from_utf8_lossy(&v).to_string())
+        if let Some(v) = meta.get(DEFAULT_INSTANCE_KEY)? {
+            return Ok(String::from_utf8_lossy(&v).to_string());
+        }
+        Ok(BUILTIN_DEFAULT_NAME.to_string())
     }
 
     /// Set the default instance. Errors if `name` does not exist.
@@ -298,11 +376,15 @@ mod tests {
     }
 
     #[test]
-    fn remove_instance_clears_default() {
+    fn remove_instance_clears_default_pointer_falls_back_to_builtin() {
+        // Prior to v0.3.1, removing the sole instance erased the default
+        // pointer and `default_instance()` errored. With the built-in
+        // fallback it now resolves to BUILTIN_DEFAULT_NAME so the binary
+        // can never end up unconfigured.
         let (store, _dir) = tmp_store();
         store.add_instance(&inst("only")).unwrap();
         store.remove_instance("only").unwrap();
-        assert!(store.default_instance().is_err());
+        assert_eq!(store.default_instance().unwrap(), BUILTIN_DEFAULT_NAME);
     }
 
     #[test]
@@ -321,9 +403,67 @@ mod tests {
     }
 
     #[test]
-    fn no_default_when_empty() {
+    fn empty_store_resolves_to_builtin_default() {
+        // The whole point of the v0.3.1 built-in: a fresh install reaches
+        // Hydra Voting with zero configuration.
         let (store, _dir) = tmp_store();
-        assert!(store.default_instance().is_err());
+        assert_eq!(store.default_instance().unwrap(), BUILTIN_DEFAULT_NAME);
+        let cfg = store.get_instance(BUILTIN_DEFAULT_NAME).unwrap();
+        assert_eq!(cfg.name, BUILTIN_DEFAULT_NAME);
+        assert_eq!(cfg.url, BUILTIN_DEFAULT_URL);
+    }
+
+    #[test]
+    fn explicit_db_entry_wins_over_builtin() {
+        // If a user (or a migration) inserts a row with the same name as
+        // the built-in but a different URL — e.g. testing a fork — the
+        // explicit row should take effect, not the hard-coded URL.
+        let (store, _dir) = tmp_store();
+        store
+            .add_instance(&InstanceConfig {
+                name: BUILTIN_DEFAULT_NAME.to_string(),
+                url: "https://staging.example.invalid".to_string(),
+            })
+            .unwrap();
+        let cfg = store.get_instance(BUILTIN_DEFAULT_NAME).unwrap();
+        assert_eq!(cfg.url, "https://staging.example.invalid");
+    }
+
+    #[test]
+    fn list_instances_includes_builtin_when_empty() {
+        let (store, _dir) = tmp_store();
+        let listed = store.list_instances().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, BUILTIN_DEFAULT_NAME);
+        assert_eq!(listed[0].url, BUILTIN_DEFAULT_URL);
+    }
+
+    #[test]
+    fn list_instances_does_not_duplicate_builtin_when_db_has_one() {
+        let (store, _dir) = tmp_store();
+        store
+            .add_instance(&InstanceConfig {
+                name: BUILTIN_DEFAULT_NAME.to_string(),
+                url: "https://override.example".to_string(),
+            })
+            .unwrap();
+        let listed = store.list_instances().unwrap();
+        assert_eq!(listed.len(), 1, "expected single row, got {listed:?}");
+        assert_eq!(listed[0].url, "https://override.example");
+    }
+
+    #[test]
+    fn set_token_works_for_builtin_name_without_explicit_add() {
+        // The whole point of issue #1: `auth set --jwt -` against the
+        // built-in name must succeed on a fresh install, without the user
+        // having to run `instances add` first. set_token validates via
+        // get_instance, which now resolves the built-in.
+        let (store, _dir) = tmp_store();
+        // A structurally valid JWT (signature placeholder); set_token
+        // doesn't inspect, the CLI handler does that separately.
+        let jwt = "header.payload.sig";
+        store.set_token(BUILTIN_DEFAULT_NAME, jwt).unwrap();
+        assert_eq!(store.get_token(BUILTIN_DEFAULT_NAME).unwrap(), jwt);
     }
 
     #[test]
@@ -384,19 +524,42 @@ mod tests {
     }
 
     #[test]
-    fn list_instances_returns_all() {
+    fn list_instances_returns_all_plus_builtin() {
+        // The built-in fallback is always present in the listing unless a
+        // DB entry already uses its name (see
+        // list_instances_does_not_duplicate_builtin_when_db_has_one).
         let (store, _dir) = tmp_store();
         store.add_instance(&inst("a")).unwrap();
         store.add_instance(&inst("b")).unwrap();
         store.add_instance(&inst("c")).unwrap();
-        let mut names: Vec<_> = store
+        let mut names: Vec<String> = store
             .list_instances()
             .unwrap()
             .into_iter()
             .map(|i| i.name)
             .collect();
         names.sort();
-        assert_eq!(names, vec!["a", "b", "c"]);
+        assert_eq!(
+            names,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                BUILTIN_DEFAULT_NAME.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_db_instance_names_excludes_builtin() {
+        let (store, _dir) = tmp_store();
+        store.add_instance(&inst("alpha")).unwrap();
+        let names = store.list_db_instance_names().unwrap();
+        assert_eq!(names, vec!["alpha".to_string()]);
+        // Empty DB returns empty — the built-in is virtual.
+        let dir = TempDir::new().unwrap();
+        let store2 = Store::open_at(dir.path()).unwrap();
+        assert!(store2.list_db_instance_names().unwrap().is_empty());
     }
 
     // ── Lock-failure handling (issue #4) ─────────────────────────────────

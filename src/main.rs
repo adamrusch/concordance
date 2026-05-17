@@ -8,7 +8,7 @@ use concordance::{
     proposal,
     proposal::ProposalDocument,
     render::{render_proposal_md, title_to_slug},
-    store::{InstanceConfig, OpenCaller, Store},
+    store::{BUILTIN_DEFAULT_NAME, InstanceConfig, OpenCaller, Store},
 };
 
 #[derive(Parser)]
@@ -231,14 +231,24 @@ fn handle_instances(store: &Store, cmd: InstancesCmd) -> anyhow::Result<()> {
         InstancesCmd::List => {
             let instances = store.list_instances()?;
             let default = store.default_instance().ok();
-            if instances.is_empty() {
-                println!("No instances configured.");
-            }
+            // Find which names actually have a DB entry, so we can flag
+            // the built-in fallback distinctly from user-added rows.
+            let db_names: std::collections::HashSet<String> = store
+                .list_db_instance_names()?
+                .into_iter()
+                .collect();
             for inst in &instances {
-                let marker = if default.as_deref() == Some(&inst.name) {
-                    " (default)"
+                let mut tags = Vec::new();
+                if default.as_deref() == Some(&inst.name) {
+                    tags.push("default");
+                }
+                if inst.name == BUILTIN_DEFAULT_NAME && !db_names.contains(&inst.name) {
+                    tags.push("built-in");
+                }
+                let marker = if tags.is_empty() {
+                    String::new()
                 } else {
-                    ""
+                    format!(" ({})", tags.join(", "))
                 };
                 println!("  {}  {}{}", inst.name, inst.url, marker);
             }

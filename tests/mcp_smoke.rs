@@ -431,8 +431,11 @@ async fn auth_status_works_against_empty_store() {
     )
     .await;
 
-    // With no instance configured, the call should return a JSON-RPC error
-    // (invalid_params: no default instance), not a panic or hang.
+    // Since v0.3.1, the built-in default instance ("hydra-voting.intersectmbo.org")
+    // is always resolvable, so this call no longer errors with "no default
+    // instance configured" — it succeeds and reports valid:false because no
+    // token has been stored yet. The interesting failure mode (server panic
+    // or hang) is still covered: we get a structured response back.
     send(
         &mut stdin,
         json!({
@@ -442,7 +445,18 @@ async fn auth_status_works_against_empty_store() {
     )
     .await;
     let resp = recv(&mut stdout).await;
-    assert!(resp.get("error").is_some(), "expected error, got {resp:?}");
+    assert!(resp.get("result").is_some(), "expected result, got {resp:?}");
+    let body: serde_json::Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(body["instance"], "hydra-voting.intersectmbo.org");
+    assert_eq!(body["valid"], false);
+    assert!(
+        body["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no token configured"),
+        "expected no-token reason, got {body:?}"
+    );
 
     drop(stdin);
     let _ = child.wait().await;
