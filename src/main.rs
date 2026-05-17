@@ -8,7 +8,7 @@ use concordance::{
     proposal,
     proposal::ProposalDocument,
     render::{render_proposal_md, title_to_slug},
-    store::{InstanceConfig, Store},
+    store::{InstanceConfig, OpenCaller, Store},
 };
 
 #[derive(Parser)]
@@ -171,7 +171,14 @@ async fn main() {
 
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let store = Store::open()?;
+    // The MCP subcommand reverses the lock-failure attribution: when it
+    // fails to acquire the lock, the offending process is a CLI command
+    // or a second MCP instance, not the MCP server itself.
+    let caller = match &cli.command {
+        Commands::Mcp => OpenCaller::Mcp,
+        _ => OpenCaller::Cli,
+    };
+    let store = Store::open_with_caller(caller)?;
 
     // dry-run submit needs no client or instance config
     if let Commands::Proposals(ProposalsCmd::Submit {

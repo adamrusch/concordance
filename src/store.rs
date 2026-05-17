@@ -29,20 +29,62 @@ pub struct Store {
     db: sled::Db,
 }
 
+/// Which caller is opening the store — used to tailor the
+/// [`Error::DatabaseBusy`] remediation hint when sled reports a lock
+/// failure. The CLI typically loses the race to a running MCP server;
+/// the MCP server typically loses the race to a CLI command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenCaller {
+    /// Default. Hint points the user at quitting Claude Code or killing
+    /// the MCP subprocess.
+    Cli,
+    /// Hint points the user at the offending CLI command / second MCP
+    /// instance.
+    Mcp,
+}
+
 impl Store {
-    /// Open the database at the default XDG data-local path.
+    /// Open the database at the default XDG data-local path, with CLI
+    /// remediation hints on lock failure.
     pub fn open() -> Result<Self> {
-        Self::open_at(db_path())
+        Self::open_with_caller(OpenCaller::Cli)
+    }
+
+    /// Open the database at the default XDG data-local path, attributing
+    /// any lock failure to the calling context (CLI vs. MCP server).
+    pub fn open_with_caller(caller: OpenCaller) -> Result<Self> {
+        Self::open_at_with_caller(db_path(), caller)
     }
 
     /// Open the database at an explicit path. Creates the directory if needed.
-    /// Primarily useful in tests.
+    /// Primarily useful in tests; uses CLI remediation messaging on lock
+    /// failure (call [`Store::open_at_with_caller`] to override).
+    ///
+    /// If sled reports a lock failure (another concordance process holds the
+    /// DB), this returns [`Error::DatabaseBusy`] with the CLI-flavoured
+    /// remediation message.
     pub fn open_at(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_at_with_caller(path, OpenCaller::Cli)
+    }
+
+    /// Open the database at an explicit path with explicit lock-error
+    /// attribution. The `caller` parameter only affects the wording of the
+    /// [`Error::DatabaseBusy`] message on failure; the happy path is
+    /// identical for both variants.
+    pub fn open_at_with_caller(path: impl AsRef<Path>, caller: OpenCaller) -> Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
-        Ok(Self {
-            db: sled::open(path)?,
-        })
+        match sled::open(path) {
+            Ok(db) => Ok(Self { db }),
+            Err(e) if is_lock_error(&e) => {
+                let msg = match caller {
+                    OpenCaller::Cli => database_busy_message_cli(path),
+                    OpenCaller::Mcp => database_busy_message_mcp(path),
+                };
+                Err(Error::DatabaseBusy(msg))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     // ── Instances ─────────────────────────────────────────────────────────────
@@ -141,6 +183,68 @@ fn db_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("concordance")
         .join("db")
+}
+
+/// Detect sled's "DB is already locked by another process" failure.
+///
+/// Sled 0.34 wraps the underlying `fs2::FileExt::try_lock_exclusive`
+/// WouldBlock error in `sled::Error::Io` with `io::ErrorKind::Other` (NOT
+/// `ErrorKind::WouldBlock` as one might expect — sled re-wraps the inner
+/// error before surfacing it; see sled-0.34.7/src/config.rs around the
+/// `try_lock` helper). We therefore match on the message body, which sled
+/// always renders as `"could not acquire lock on ..."` regardless of OS,
+/// since that string is the portable invariant across macOS (EAGAIN/35),
+/// Linux (EWOULDBLOCK), and Windows.
+fn is_lock_error(e: &sled::Error) -> bool {
+    match e {
+        sled::Error::Io(io) => {
+            // Belt-and-suspenders: accept either the (theoretical)
+            // WouldBlock kind or the (actual, sled-0.34) message-based form.
+            io.kind() == std::io::ErrorKind::WouldBlock
+                || io.to_string().contains("could not acquire lock")
+        }
+        _ => false,
+    }
+}
+
+/// Remediation message shown when the CLI hits the lock — i.e. the MCP
+/// server (long-running, spawned by Claude Code) is the likely culprit.
+pub(crate) fn database_busy_message_cli(path: &Path) -> String {
+    format!(
+        "concordance is already running with the database open (likely the MCP\n\
+         server spawned by Claude Code / your MCP client). The on-disk store is\n\
+         single-writer per process, so the CLI can't run while another process\n\
+         holds the lock at {}.\n\
+         Either:\n  \
+           - quit Claude Code (or `/mcp` -> disable the `concordance` server),\n    \
+             then retry the command\n  \
+           - or kill the MCP subprocess and retry:\n        pkill -f 'concordance mcp'\n\
+         See https://github.com/adamrusch/concordance/issues/2 for the\n\
+         architectural fix that will let CLI and MCP coexist.",
+        path.display()
+    )
+}
+
+/// Remediation message shown when the MCP server hits the lock — i.e. a
+/// CLI command (or a second MCP instance) is the likely culprit.
+pub(crate) fn database_busy_message_mcp(path: &Path) -> String {
+    format!(
+        "concordance can't start the MCP server: the database at {} is\n\
+         already locked by another concordance process (probably a\n\
+         CLI command still running, or another MCP server instance).\n\
+         Either wait for the other process to finish, or:\n    \
+             pkill -f 'concordance'\n\
+         See https://github.com/adamrusch/concordance/issues/2 for the\n\
+         architectural fix that will let CLI and MCP coexist.",
+        path.display()
+    )
+}
+
+/// Path the default-location store opens at. Exposed so callers (the
+/// MCP-side error remap, tests) can compose remediation messages with
+/// the exact path users see in CLI output.
+pub fn default_db_path() -> PathBuf {
+    db_path()
 }
 
 #[cfg(test)]
@@ -293,5 +397,73 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    // ── Lock-failure handling (issue #4) ─────────────────────────────────
+
+    /// When a second `Store::open_at` runs against a path already opened
+    /// by another live `Store`, sled fails the lock acquisition and the
+    /// CLI gets the [`Error::DatabaseBusy`] variant with the
+    /// quit-Claude-Code remediation hint.
+    #[test]
+    fn double_open_returns_database_busy_with_cli_hint() {
+        let dir = TempDir::new().unwrap();
+        let _first = Store::open_at(dir.path()).expect("first open succeeds");
+        let result = Store::open_at(dir.path());
+        let err = match result {
+            Ok(_) => panic!("second open must fail while first is alive"),
+            Err(e) => e,
+        };
+        match err {
+            Error::DatabaseBusy(msg) => {
+                assert!(msg.contains("Claude Code"), "CLI hint missing: {msg}");
+                assert!(msg.contains("pkill"), "remediation hint missing: {msg}");
+                assert!(msg.contains("issues/2"), "fixme link missing: {msg}");
+            }
+            other => panic!("expected Error::DatabaseBusy, got {other:?}"),
+        }
+    }
+
+    /// Same scenario but the second caller is the MCP server: the
+    /// message must call out that a CLI command is the likely culprit.
+    #[test]
+    fn double_open_with_mcp_caller_returns_mcp_flavoured_hint() {
+        let dir = TempDir::new().unwrap();
+        let _first = Store::open_at(dir.path()).expect("first open succeeds");
+        let result = Store::open_at_with_caller(dir.path(), OpenCaller::Mcp);
+        let err = match result {
+            Ok(_) => panic!("second open must fail while first is alive"),
+            Err(e) => e,
+        };
+        match err {
+            Error::DatabaseBusy(msg) => {
+                assert!(msg.contains("MCP server"), "MCP hint missing: {msg}");
+                assert!(msg.contains("CLI command"), "CLI culprit hint missing: {msg}");
+                assert!(msg.contains("issues/2"), "fixme link missing: {msg}");
+            }
+            other => panic!("expected Error::DatabaseBusy, got {other:?}"),
+        }
+    }
+
+    /// The lock-error message must be printed cleanly via the `Display`
+    /// impl on `Error` — i.e. without the `store error:` prefix that
+    /// raw `sled::Error` would carry. This is the user-visible bit:
+    /// `eprintln!("error: {e}")` in main() should yield the multi-line
+    /// remediation, not a tangled `error: store error: IO error: ...`.
+    #[test]
+    fn database_busy_displays_without_store_error_prefix() {
+        let dir = TempDir::new().unwrap();
+        let _first = Store::open_at(dir.path()).expect("first open succeeds");
+        let result = Store::open_at(dir.path());
+        let err = match result {
+            Ok(_) => panic!("second open must fail while first is alive"),
+            Err(e) => e,
+        };
+        let rendered = err.to_string();
+        assert!(
+            !rendered.starts_with("store error:"),
+            "got store-error-prefixed message: {rendered}"
+        );
+        assert!(rendered.contains("concordance is already running"));
     }
 }

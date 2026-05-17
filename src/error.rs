@@ -34,6 +34,13 @@ pub enum Error {
     #[error("store error: {0}")]
     Store(#[from] sled::Error),
 
+    /// The on-disk store is already locked by another concordance process.
+    /// The message body is fully formatted at the call site (no `store
+    /// error:` prefix) so callers — CLI vs. MCP server — can tailor the
+    /// remediation hint to their context.
+    #[error("{0}")]
+    DatabaseBusy(String),
+
     #[error("bincode error: {0}")]
     Bincode(String),
 
