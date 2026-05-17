@@ -58,12 +58,13 @@
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 use crate::error::{Error, Result};
 
@@ -79,12 +80,25 @@ pub const BUILTIN_DEFAULT_URL: &str = "https://hydra-voting.intersectmbo.org";
 const INSTANCES_FILE: &str = "instances.toml";
 /// Filename for the tokens TOML file.
 const TOKENS_FILE: &str = "tokens.toml";
+/// Dedicated lockfile. Created once and never renamed; all writers
+/// acquire an exclusive `fs2` lock on this file before touching the
+/// data files. Locking a file that survives writeback is the
+/// difference between v0.3.0 (locked the destination file, which the
+/// rename invalidated mid-write) and v0.3.1+ (locks a stable inode).
+const LOCK_FILE: &str = ".lock";
 /// Subdirectory the v0.3.x sled DB used (still inspected on first run
 /// for one-shot migration to the TOML files).
 const LEGACY_SLED_DIR: &str = "db";
 
 /// Maximum number of lock-acquisition retries before giving up.
-const LOCK_RETRIES: u32 = 50;
+///
+/// At [`LOCK_RETRY_SLEEP`] = 10ms this caps total wait at ~2s, which
+/// is well above any realistic contention shape (CLI + long-running
+/// MCP server typically race on one write at a time). The earlier
+/// 500ms cap (50 retries) was fine for normal use but too tight for
+/// stress tests that fire 200+ contended writes at once on a tired
+/// SSD; bumped per Oracle's review.
+const LOCK_RETRIES: u32 = 200;
 /// Sleep between lock-acquisition retries.
 const LOCK_RETRY_SLEEP: Duration = Duration::from_millis(10);
 
@@ -244,7 +258,7 @@ impl Store {
         }
         eprintln!(
             "note: a v0.3.x sled-backed store was detected at {}.\n      \
-             The v0.3.2+ store uses plain TOML files in the same\n      \
+             The v0.3.1+ store uses plain TOML files in the same\n      \
              directory ({} / {}); the legacy `db/` dir is left in\n      \
              place but is no longer read. Re-pair your JWT with:\n          \
                  pbpaste | concordance auth set --jwt -",
@@ -262,6 +276,9 @@ impl Store {
     }
     fn tokens_path(&self) -> PathBuf {
         self.root.join(TOKENS_FILE)
+    }
+    fn lock_path(&self) -> PathBuf {
+        self.root.join(LOCK_FILE)
     }
 
     // ── Instances ─────────────────────────────────────────────────────
@@ -438,15 +455,9 @@ impl Store {
         F: FnOnce(&mut InstancesFile) -> Result<()>,
     {
         let path = self.instances_path();
-        with_locked_file(&path, self.caller, |handle| {
-            let mut contents = String::new();
-            handle.read_to_string(&mut contents)?;
-            let mut file: InstancesFile = if contents.trim().is_empty() {
-                InstancesFile::default()
-            } else {
-                toml::from_str(&contents)
-                    .map_err(|e| Error::Parse(format!("{}: {e}", path.display())))?
-            };
+        let lock = self.lock_path();
+        with_store_lock(&lock, self.caller, || {
+            let mut file = read_instances_at(&path)?;
             f(&mut file)?;
             let serialized = toml::to_string_pretty(&file)
                 .map_err(|e| Error::Parse(format!("serialize instances.toml: {e}")))?;
@@ -462,15 +473,9 @@ impl Store {
         F: FnOnce(&mut TokensFile) -> Result<()>,
     {
         let path = self.tokens_path();
-        with_locked_file(&path, self.caller, |handle| {
-            let mut contents = String::new();
-            handle.read_to_string(&mut contents)?;
-            let mut tokens: TokensFile = if contents.trim().is_empty() {
-                TokensFile::default()
-            } else {
-                toml::from_str(&contents)
-                    .map_err(|e| Error::Parse(format!("{}: {e}", path.display())))?
-            };
+        let lock = self.lock_path();
+        with_store_lock(&lock, self.caller, || {
+            let mut tokens = read_tokens_at(&path)?;
             f(&mut tokens)?;
             let serialized = toml::to_string_pretty(&tokens)
                 .map_err(|e| Error::Parse(format!("serialize tokens.toml: {e}")))?;
@@ -480,24 +485,66 @@ impl Store {
     }
 }
 
-/// Acquire an exclusive `fs2` lock on `path` (creating it if needed) and
-/// run `body` against the locked file handle. Retries `LOCK_RETRIES`
-/// times with `LOCK_RETRY_SLEEP` between attempts before giving up.
+/// Re-read `instances.toml` from disk inside a held lock. Mirrors
+/// [`Store::read_instances`] but takes an explicit path so the
+/// write-side `with_store_lock` block can call it without needing
+/// `&self`.
+fn read_instances_at(path: &Path) -> Result<InstancesFile> {
+    if !path.exists() {
+        return Ok(InstancesFile::default());
+    }
+    let contents = std::fs::read_to_string(path)?;
+    if contents.trim().is_empty() {
+        return Ok(InstancesFile::default());
+    }
+    toml::from_str(&contents).map_err(|e| Error::Parse(format!("{}: {e}", path.display())))
+}
+
+/// Mirror of [`read_instances_at`] for `tokens.toml`.
+fn read_tokens_at(path: &Path) -> Result<TokensFile> {
+    if !path.exists() {
+        return Ok(TokensFile::default());
+    }
+    let contents = std::fs::read_to_string(path)?;
+    if contents.trim().is_empty() {
+        return Ok(TokensFile::default());
+    }
+    toml::from_str(&contents).map_err(|e| Error::Parse(format!("{}: {e}", path.display())))
+}
+
+/// Acquire an exclusive `fs2` lock on the store-wide `lockfile`
+/// (creating it if needed) and run `body` while the lock is held.
+/// Retries [`LOCK_RETRIES`] times with [`LOCK_RETRY_SLEEP`] between
+/// attempts before returning [`Error::DatabaseBusy`].
 ///
-/// The lock is held only for the duration of `body`; on return (success
-/// or error) the handle is dropped and the lock released. This is the
-/// whole point of the file-based store: lock windows are microseconds,
-/// not process-lifetimes.
-fn with_locked_file<F, R>(path: &Path, caller: OpenCaller, body: F) -> Result<R>
+/// `body` does its own file I/O against the actual data files
+/// (`instances.toml` / `tokens.toml`). Locking a dedicated
+/// never-renamed file is the correctness invariant: locking the
+/// destination file directly leaves the held fd pointing at the
+/// pre-rename inode the moment writeback finishes, which lets two
+/// concurrent writers each acquire their own independent lock on
+/// different inodes. The v0.3.0 store had that bug; v0.3.1+ doesn't.
+///
+/// Reads stay unlocked and rely on the atomic-rename invariant
+/// (`std::fs::rename` is atomic on every POSIX FS we target): a
+/// concurrent reader sees either the old contents or the new
+/// contents, never a partial write. With writers correctly serialized
+/// through this lock, that invariant holds.
+///
+/// Lock-window cost on healthy SSDs is a few milliseconds; on a
+/// sleepy laptop with the disk spun down it can climb into the low
+/// tens of ms (the tmpfile `sync_all` dominates). The 500ms retry
+/// budget covers that worst case plus headroom.
+fn with_store_lock<F, R>(lockfile: &Path, caller: OpenCaller, body: F) -> Result<R>
 where
-    F: FnOnce(&mut File) -> Result<R>,
+    F: FnOnce() -> Result<R>,
 {
-    let mut handle: File = OpenOptions::new()
+    let handle: File = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(path)?;
+        .open(lockfile)?;
     let mut attempts = 0u32;
     loop {
         match handle.try_lock_exclusive() {
@@ -505,14 +552,16 @@ where
             Err(e) if is_would_block(&e) => {
                 attempts += 1;
                 if attempts >= LOCK_RETRIES {
-                    return Err(Error::DatabaseBusy(database_busy_message(path, caller)));
+                    return Err(Error::DatabaseBusy(database_busy_message(
+                        lockfile, caller,
+                    )));
                 }
                 std::thread::sleep(LOCK_RETRY_SLEEP);
             }
             Err(e) => return Err(Error::Io(e)),
         }
     }
-    let result = body(&mut handle);
+    let result = body();
     // Best-effort unlock; even if this fails the OS will release on
     // close. Drop happens implicitly when `handle` goes out of scope.
     let _ = FileExt::unlock(&handle);
@@ -543,31 +592,26 @@ fn atomic_replace_with_mode(path: &Path, contents: &[u8], mode: u32) -> Result<(
     let parent = path
         .parent()
         .ok_or_else(|| Error::Parse(format!("invalid store path {}", path.display())))?;
-    let tmp = parent.join(format!(
-        ".{}.tmp.{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
 
-    // Scope the file handle so it closes (and flushes) before we rename.
+    // tempfile::NamedTempFile gives us a per-call unique name (pid +
+    // monotonic counter + random suffix), so two threads in the same
+    // process never collide on the tmp path even back-to-back under
+    // the lock. The earlier per-PID-only scheme had a collision race
+    // surfaceable from multi-threaded contention.
+    let mut tmp = NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
     {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(mode);
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = mode; // unused outside unix builds
-        }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(contents)?;
-        f.sync_all()?;
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))?;
     }
-
-    std::fs::rename(&tmp, path)?;
+    #[cfg(not(unix))]
+    {
+        let _ = mode; // unused outside unix builds
+    }
+    tmp.write_all(contents)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| Error::Io(e.error))?;
     Ok(())
 }
 
@@ -850,12 +894,14 @@ mod tests {
         assert!(listed.iter().any(|i| i.name == "alpha"));
     }
 
-    /// Stress test: 50 sequential writes from two handles interleaved.
-    /// Validates that the lock-then-write cycle is genuinely atomic;
-    /// neither handle should ever see a torn TOML file or lose an
-    /// update.
+    /// 50 sequential writes from two handles, interleaved on a single
+    /// thread. Validates the read-modify-write cycle is serial and
+    /// last-write-wins ordering holds. Renamed from
+    /// `interleaved_writes_from_two_handles_dont_lose_updates` because
+    /// the old name suggested concurrency — this is single-threaded;
+    /// the real concurrency test is below.
     #[test]
-    fn interleaved_writes_from_two_handles_dont_lose_updates() {
+    fn sequential_interleaved_writes_serialize_correctly() {
         let dir = TempDir::new().unwrap();
         let a = Store::open_at(dir.path()).unwrap();
         let b = Store::open_at(dir.path()).unwrap();
@@ -867,6 +913,54 @@ mod tests {
         // Last write wins; either handle should see "b.tok.24".
         assert_eq!(a.get_token("shared").unwrap(), "b.tok.24");
         assert_eq!(b.get_token("shared").unwrap(), "b.tok.24");
+    }
+
+    /// Real concurrency test: 8 threads × 25 writes each against one
+    /// store root, each thread opening its own `Store` handle. This
+    /// catches the v0.3.0 lock-vs-rename race (Oracle reproduced
+    /// ENOENT panics on that codepath). After the v0.3.1 lockfile
+    /// fix, the run must (a) have no thread panic, (b) leave the
+    /// tokens file parseable, and (c) end with a token value from one
+    /// of the writers — i.e. no torn writes.
+    #[test]
+    fn concurrent_writes_from_multiple_threads_dont_panic() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let bootstrap = Store::open_at(&root).unwrap();
+        bootstrap.add_instance(&inst("shared")).unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let r = root.clone();
+                std::thread::spawn(move || {
+                    let s = Store::open_at(&r).expect("thread store open");
+                    for i in 0..25 {
+                        s.set_token("shared", &format!("t{t}.tok.{i}"))
+                            .expect("thread set_token");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // Final value must be one of the writers' last writes.
+        let final_tok = bootstrap.get_token("shared").unwrap();
+        assert!(
+            final_tok.starts_with('t') && final_tok.contains(".tok."),
+            "unexpected final token value: {final_tok:?}"
+        );
+
+        // tokens.toml must still be parseable (no torn write).
+        let raw = std::fs::read_to_string(root.join(TOKENS_FILE)).unwrap();
+        let parsed: TokensFile =
+            toml::from_str(&raw).expect("tokens.toml parseable after concurrent writes");
+        assert_eq!(
+            parsed.tokens.get("shared").map(String::as_str),
+            Some(final_tok.as_str())
+        );
     }
 
     /// The CLI hint must mention pkill and the file path. The MCP hint
