@@ -41,13 +41,18 @@ pub enum Error {
     )]
     NoIdentity,
 
+    /// Generic store error. Kept on the variant list for backwards
+    /// compatibility with callers that may have matched on this name;
+    /// the v0.3.x sled `#[from]` impl is gone, but a future store
+    /// backend may want to emit this.
     #[error("store error: {0}")]
-    Store(#[from] sled::Error),
+    Store(String),
 
-    /// The on-disk store is already locked by another concordance process.
-    /// The message body is fully formatted at the call site (no `store
-    /// error:` prefix) so callers — CLI vs. MCP server — can tailor the
-    /// remediation hint to their context.
+    /// The on-disk store is locked by another concordance process for
+    /// longer than the retry window. With the v0.3.2+ file-based store
+    /// this is rare (microsecond locks), but the variant is kept so
+    /// callers — CLI vs. MCP server — can render a context-tailored
+    /// remediation hint without the `store error:` prefix.
     #[error("{0}")]
     DatabaseBusy(String),
 

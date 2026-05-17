@@ -187,7 +187,7 @@ Direct CLI use (no LLM in the loop) is the same as exegesis: `concordance --help
 cargo test --release
 ```
 
-…runs 106 tests across 5 suites: unit tests for parsing, auth, store, identity; property tests; integration round-trip tests; and an MCP smoke test that spawns the binary, drives the MCP protocol over stdio, and asserts the v0.3 tool catalog + annotation contract.
+…runs 126 tests across 5 suites: unit tests for parsing, auth, store, identity; property tests; integration round-trip tests; and an MCP smoke test that spawns the binary, drives the MCP protocol over stdio, and asserts the v0.3 tool catalog + annotation contract.
 
 ## License
 

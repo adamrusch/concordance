@@ -222,7 +222,10 @@ In MCP mode, the JWT is sourced in this order:
 
 1. `CONCORDANCE_JWT` environment variable (lets an agent inject the token
    per-session without writing it to disk).
-2. The sled store entry for the requested instance.
+2. The local store entry for the requested instance (plain TOML at
+   `$XDG_DATA_HOME/concordance/tokens.toml`, mode 0600 on POSIX). As of
+   v0.3.2 the store is plain TOML files rather than an embedded sled DB
+   so the CLI and the MCP server can share state without lock conflict.
 
 If neither resolves a valid token, tool calls return an error pointing the
 agent at the local-only `auth_status` tool and the
