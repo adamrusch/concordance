@@ -263,6 +263,13 @@ mod tests {
 
     /// Build a client + run `list_proposals` against the one-shot mock, then
     /// return the captured request line for query-string assertions.
+    ///
+    /// We deliberately ignore the result of `list_proposals` — the goal is
+    /// to verify what's on the wire, not the response. Decoupling test
+    /// pass/fail from response-shape evolution: if `api::PageMeta` gains a
+    /// required field, the deserialize fails and `list_proposals` returns
+    /// `Err`, but the request line is already captured and the URL-assertion
+    /// tests still pass. Closes the fragility flagged in issue #9.
     #[allow(clippy::too_many_arguments)]
     async fn capture_list_proposals_url(
         vote_id: &str,
@@ -281,8 +288,7 @@ mod tests {
             .list_proposals(
                 vote_id, status, page, limit, search, proposer, category, sort, direction,
             )
-            .await
-            .expect("mock 200");
+            .await;
         let line = captured.lock().unwrap().clone();
         line.expect("captured request")
     }
