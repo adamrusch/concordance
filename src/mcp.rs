@@ -178,6 +178,29 @@ pub struct ListProposalsArgs {
     /// Page size (1-100).
     #[serde(default = "default_limit")]
     pub limit: u32,
+    /// Free-text search across proposal title and summary. **Server quirk:**
+    /// single-word queries empirically return the unfiltered result set on
+    /// hydra-voting.intersectmbo.org — e.g. `search=Cardano` returns all 69
+    /// proposals while `search=ai finance` correctly filters to 1. Use
+    /// multi-word terms when narrowing, or fall through to client-side
+    /// substring matching for single-token searches.
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Filter by proposer address. Bech32 form — `stake1...` or `drep1...`.
+    /// Useful for "show me proposals from <address>".
+    #[serde(default)]
+    pub proposer: Option<String>,
+    /// Comma-separated list of category ObjectIds. The categories available
+    /// for a given vote cycle live on its `filterOptions.category` field.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Sort field. Must be one of the vote cycle's `sortOptions`. Server
+    /// default is `submittedAt`.
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Sort direction: `asc` or `desc`. Server default is `desc`.
+    #[serde(default)]
+    pub direction: Option<String>,
     /// Instance name. Omit to use the configured default instance.
     #[serde(default)]
     pub instance: Option<String>,
@@ -520,9 +543,25 @@ impl ConcordanceServer {
         }))
     }
 
-    /// List proposals within a vote cycle. Status defaults to `live`. Pass
-    /// `all` to include withdrawn proposals; `draft` is admin/owner-only and
-    /// rejected by the server for non-privileged callers.
+    /// List proposals within a vote cycle. Status defaults to `live`; pass
+    /// `all` to include withdrawn proposals (`draft` is admin/owner-only and
+    /// rejected by the server for non-privileged callers).
+    ///
+    /// Optional filters and ordering controls (all backed by the upstream
+    /// OpenAPI spec at `docs/upstream/proposals-openapi.yaml`):
+    ///
+    /// - `search`: free-text match across title + summary. **Server quirk:**
+    ///   single-word queries empirically don't filter on
+    ///   hydra-voting.intersectmbo.org — e.g. `search=Cardano` returns all 69
+    ///   proposals, `search=ai finance` filters to 1. Use multi-word terms
+    ///   when narrowing, or fall through to client-side substring matching
+    ///   for single-token searches.
+    /// - `proposer`: bech32 address (`stake1...` or `drep1...`); narrows to
+    ///   proposals from that author.
+    /// - `category`: comma-separated category ObjectIds (resolve from the
+    ///   vote cycle's `filterOptions.category`).
+    /// - `sort` + `direction`: server defaults are `submittedAt` / `desc`;
+    ///   `sort` must match one of the vote cycle's `sortOptions`.
     #[tool(
         name = "list_proposals",
         annotations(read_only_hint = true, idempotent_hint = true)
@@ -548,8 +587,27 @@ impl ConcordanceServer {
             }
         };
 
+        if let Some(d) = args.direction.as_deref() {
+            if d != "asc" && d != "desc" {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown direction {d:?}; expected one of: asc, desc"),
+                    None,
+                ));
+            }
+        }
+
         let page = client
-            .list_proposals(&args.vote_id, status_filter, args.page, args.limit)
+            .list_proposals(
+                &args.vote_id,
+                status_filter,
+                args.page,
+                args.limit,
+                args.search.as_deref(),
+                args.proposer.as_deref(),
+                args.category.as_deref(),
+                args.sort.as_deref(),
+                args.direction.as_deref(),
+            )
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         json_result(serde_json::to_value(&page).unwrap_or(Value::Null))

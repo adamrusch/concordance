@@ -373,7 +373,9 @@ async fn handle_proposals(
 ) -> anyhow::Result<()> {
     match cmd {
         ProposalsCmd::List { vote, limit } => {
-            let page = client.list_proposals(&vote, None, 1, limit).await?;
+            let page = client
+                .list_proposals(&vote, None, 1, limit, None, None, None, None, None)
+                .await?;
             println!(
                 "Proposals on '{instance}' for vote {vote} ({} total):",
                 page.meta.total
@@ -391,7 +393,9 @@ async fn handle_proposals(
             let mut page = 1u32;
             let mut saved = 0u32;
             loop {
-                let result = client.list_proposals(&vote, None, page, 50).await?;
+                let result = client
+                    .list_proposals(&vote, None, page, 50, None, None, None, None, None)
+                    .await?;
                 let total_pages = result.meta.total_pages;
                 for stub in &result.data {
                     let p = client.get_proposal(&stub.id).await?;

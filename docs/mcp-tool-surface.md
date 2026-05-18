@@ -33,7 +33,7 @@ field. For the user-facing setup flow, see
 |------|--------|-------|
 | v0.2 MVP | ✅ shipped | 7 tools — review proposals and post a comment via an agent |
 | **v0.3 identity & signature** | ✅ shipped | **5 identity tools + signature injection in `create_comment`** |
-| v0.2.1 stretch | planned | 4 tools — fills out read/comment surface (likes, replies-only list, comment edit, search filter) |
+| v0.2.1 stretch | partial | fills out read/comment surface (likes, replies-only list, comment edit). `list_proposals` filter/sort args landed early in v0.3.x. |
 | v0.4 authoring | planned | 4 tools — proposal submission/withdrawal (proposers only) |
 | local/config | partial | 2 tools — multi-instance helpers |
 
@@ -123,12 +123,20 @@ through this sequence:
 
 | | |
 |---|---|
-| **Args** | `vote_id`, `status?` (`live\|withdrawn\|all`, default `live`), `page?` (default `1`), `limit?` (default `20`), `instance?` |
+| **Args** | `vote_id`, `status?` (`live\|withdrawn\|all`, default `live`), `page?` (default `1`), `limit?` (default `20`), `search?`, `proposer?`, `category?`, `sort?`, `direction?` (`asc\|desc`), `instance?` |
 | **Annotations** | `readOnlyHint`, `idempotentHint` |
 | **Returns** | `{data: [{id, title, summary, status, proposer, version, comment_count, submitted_at}], meta: {page, limit, total, total_pages, has_next_page}}` |
-| **Why** | Bulk browse with a status filter — useful for cycles with many proposals (Budget 2026 has 69). `draft` is admin/owner-only on the server and is omitted from the user-facing enum. |
+| **Why** | Bulk browse with status, proposer, category, free-text search, and sort controls — useful for cycles with many proposals (Budget 2026 has 69). `draft` is admin/owner-only on the server and is omitted from the user-facing enum. All five filter args are backed by the upstream spec at `docs/upstream/proposals-openapi.yaml`. |
 
-> **Deferred to v0.2.1:** the `search?` param (substring match) and the `category?` filter (which maps to vote-specific `metaData.strategyFramework.pillars` and would let an agent filter for, e.g., a specific strategic pillar). Empirical probing showed the obvious `?search=` and `?query=` URL params don't filter on hydra-voting; the search transport needs more investigation before we expose it as a tool arg.
+**Server quirk — single-word `search`:** empirical probing of
+hydra-voting.intersectmbo.org shows single-word searches return the
+unfiltered set (`search=Cardano` → all 69 proposals, total unchanged),
+while multi-word searches filter correctly (`search=ai finance` → 1
+match). The tool description tells the agent to prefer multi-word
+queries or to fall back to client-side substring matching for single
+tokens. The transport encoding is correct (verified by the unit tests
+in `src/client.rs`) — this is server-side behavior. Not blocking the
+arg; documenting it.
 
 ### `get_proposal`
 

@@ -172,7 +172,7 @@ The current tool catalog has 12 tools. The full spec — with arguments, return 
 
 ## Roadmap
 
-- **v0.2.1** — round out the read & write surface: comment likes, comment editing (15-min window on the server), focused thread reads by author type, and the proposal `search` filter (needs more API spelunking to find the right wire format).
+- **v0.2.1** — round out the read & write surface: comment likes, comment editing (15-min window on the server), focused thread reads by author type. (The proposal `search`/`proposer`/`category`/`sort` filters landed early in v0.3.x once the upstream OpenAPI spec was vendored at [docs/upstream/proposals-openapi.yaml](docs/upstream/proposals-openapi.yaml).)
 - **v0.4** — proposal-authoring tools for DReps and CC members submitting their own proposals; generated tool descriptors so OpenAI, Gemini, and Grok can use Concordance natively without per-LLM adapters.
 
 If you have an opinion on what should land next, open an issue.
