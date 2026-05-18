@@ -89,6 +89,13 @@ const LOCK_FILE: &str = ".lock";
 /// Subdirectory the v0.3.x sled DB used (still inspected on first run
 /// for one-shot migration to the TOML files).
 const LEGACY_SLED_DIR: &str = "db";
+/// Marker file written next to the legacy sled `db/` directory once the
+/// migration notice has been printed. Subsequent opens see the marker
+/// and skip the message, so a user who keeps `db/` around for inspection
+/// (but is happy with the built-in default and never runs
+/// `instances add`) isn't spammed with the same note on every command.
+/// Delete the marker (or remove `db/`) to re-arm it.
+const MIGRATION_ACK_FILE: &str = ".migration_acknowledged";
 
 /// Maximum number of lock-acquisition retries before giving up.
 ///
@@ -250,22 +257,34 @@ impl Store {
     fn maybe_migrate_from_sled(&self) -> Result<()> {
         let instances_path = self.root.join(INSTANCES_FILE);
         let legacy = self.root.join(LEGACY_SLED_DIR);
+        let ack = self.root.join(MIGRATION_ACK_FILE);
         if instances_path.exists() {
             return Ok(()); // already migrated, or fresh-TOML install
         }
         if !legacy.exists() {
             return Ok(()); // clean install, nothing to migrate
         }
+        if ack.exists() {
+            // User has been notified once already; skip the message so
+            // every CLI invocation isn't spammed with the same note.
+            // Removing the ack file (or `db/`) re-arms the notice.
+            return Ok(());
+        }
         eprintln!(
             "note: a v0.3.x sled-backed store was detected at {}.\n      \
              The v0.3.1+ store uses plain TOML files in the same\n      \
              directory ({} / {}); the legacy `db/` dir is left in\n      \
              place but is no longer read. Re-pair your JWT with:\n          \
-                 pbpaste | concordance auth set --jwt -",
+                 pbpaste | concordance auth set --jwt -\n      \
+             (This notice prints once; rm {}/{} to re-arm it.)",
             legacy.display(),
             INSTANCES_FILE,
             TOKENS_FILE,
+            self.root.display(),
+            MIGRATION_ACK_FILE,
         );
+        // Best-effort marker write — if it fails we just reprint next run.
+        let _ = std::fs::write(&ack, "v0.3.1 sled-migration notice shown\n");
         Ok(())
     }
 
@@ -423,6 +442,15 @@ impl Store {
     }
 
     // ── Read helpers ──────────────────────────────────────────────────
+    //
+    // Reads run unlocked. Safety is provided by the atomic-rename invariant
+    // in `atomic_replace_with_mode`: a concurrent reader observes either
+    // the pre-rename contents or the post-rename contents, never a partial
+    // write. **That invariant only holds while writers are correctly
+    // serialized** through `with_store_lock` — which they are in v0.3.1+
+    // via the dedicated `.lock` file. If a future change splits writes
+    // away from the lockfile, the read paths here will need their own
+    // synchronization. Flagged per Oracle's v0.3.0 → v0.3.1 review.
 
     fn read_instances(&self) -> Result<InstancesFile> {
         let path = self.instances_path();
@@ -1005,5 +1033,44 @@ mod tests {
         // Both alive at once — previously this would have failed at the
         // sled lock. The file-based store has no notion of "the handle
         // is open"; it just opens, locks per call, and releases.
+    }
+
+    /// Migration notice is one-shot: legacy `db/` triggers the message
+    /// once, after which a `.migration_acknowledged` marker silences
+    /// subsequent opens. Removing the marker re-arms the notice. Closes
+    /// Oracle's deferred note #7 from the v0.3.0 → v0.3.1 review.
+    #[test]
+    fn sled_migration_notice_silences_after_first_open() {
+        let dir = TempDir::new().unwrap();
+        // Plant a fake legacy sled dir.
+        std::fs::create_dir(dir.path().join(LEGACY_SLED_DIR)).unwrap();
+        let ack = dir.path().join(MIGRATION_ACK_FILE);
+
+        // First open arms the message and writes the ack marker.
+        let _ = Store::open_at(dir.path()).unwrap();
+        assert!(
+            ack.exists(),
+            "first open should write {MIGRATION_ACK_FILE}"
+        );
+
+        // Capture the ack's mtime so we can verify the second open
+        // doesn't rewrite it (cheap proxy for "noop").
+        let first_mtime = std::fs::metadata(&ack).unwrap().modified().unwrap();
+
+        // Subsequent opens find the marker and skip the print path
+        // entirely — the marker is not touched.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = Store::open_at(dir.path()).unwrap();
+        let second_mtime = std::fs::metadata(&ack).unwrap().modified().unwrap();
+        assert_eq!(
+            first_mtime, second_mtime,
+            "subsequent open should not rewrite the ack file"
+        );
+
+        // Removing the marker re-arms the notice — the next open writes
+        // a fresh ack.
+        std::fs::remove_file(&ack).unwrap();
+        let _ = Store::open_at(dir.path()).unwrap();
+        assert!(ack.exists(), "re-armed open should re-create the marker");
     }
 }
