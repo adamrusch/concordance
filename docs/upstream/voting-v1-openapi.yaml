@@ -1,0 +1,1771 @@
+# Mirror of github.com/lerna-labs/ekklesia-docs api/voting/openapi.v1.yaml, fetched 2026-05-17 at f00cab1147b521e18a34c57f6c92d4bcc0cf0001
+openapi: 3.0.3
+info:
+  title: Ekklesia Voting Backend API — v1
+  description: |
+    Hydra-backed live surface for the Ekklesia voting platform. v1 is paired
+    with the v0 archival surface (see `openapi.v0.yaml`) — the two coexist.
+
+    ## What lives here
+
+    - **Unified ballot listing** across legacy + Hydra sources.
+    - **Broker endpoints** for Hydra votes: draft the signing payload,
+      collect signatures (key-based or m-of-n multisig), submit to Hydra,
+      surface confirmation artifacts.
+    - **Audit artifacts**: per-proposal canonical content bytes, downloadable
+      audit bundles, and authority certification state — all public and
+      unauthenticated by design.
+    - **Public integrator surface** under `/public/*` — API-key gated,
+      rate-limited, read-only.
+
+    Operational lifecycle endpoints (Hydra head management, ballot
+    ingestion, voting-power uploads, authority certification) are
+    administrator-only and not part of the published API surface.
+
+    ## Authentication
+
+    - JWT (cookie or `Authorization: Bearer`) for voter session endpoints.
+      Sessions are issued by `/api/v0/session` after CIP-8 message signing.
+    - API key (`Authorization: Bearer <key>` or `x-api-key`) for `/public/*`.
+      Keys carry scopes (e.g. `read:ballots`, `read:results`) and per-key
+      rate limits.
+  version: 1.0.0
+  contact:
+    name: Adam Dean, Mad Orkestra
+  license:
+    name: ISC
+servers:
+- url: '{baseUrl}/api/v1'
+  description: Ekklesia Voting API v1 instance
+  variables:
+    baseUrl:
+      default: https://api.example.com
+      description: Base URL of the Ekklesia Voting API instance
+tags:
+- name: Unified Ballots
+  description: Cross-source ballot listing and detail
+- name: Results
+  description: Anonymous-readable provisional + final tallies (polled)
+- name: Votes (v1)
+  description: Broker pipeline — draft, signature, submission
+- name: Public
+  description: Integrator read-only endpoints (API-key gated)
+- name: Health
+  description: Liveness probe
+paths:
+  /health:
+    get:
+      tags:
+      - Health
+      summary: v1 version + liveness probe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: v1
+                  status:
+                    type: string
+                    example: ok
+                  timestamp:
+                    type: string
+                    format: date-time
+  /config:
+    get:
+      tags:
+      - Health
+      summary: Deployment runtime config (explorer + IPFS gateway + network)
+      description: 'Public, unauthenticated. Frontends and third-party integrators read
+
+        this to render explorer / IPFS links without hardcoding a network.
+
+        Each instance returns its own configured values; safe defaults are
+
+        used when the deployment hasn''t overridden them.
+
+        '
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - ipfsGatewayBase
+                - explorerTxBase
+                - explorerAddressBase
+                - network
+                properties:
+                  ipfsGatewayBase:
+                    type: string
+                    example: https://ipfs.io/ipfs/
+                  explorerTxBase:
+                    type: string
+                    example: https://cexplorer.io/tx/
+                  explorerAddressBase:
+                    type: string
+                    example: https://cexplorer.io/address/
+                  network:
+                    type: string
+                    enum:
+                    - preprod
+                    - preview
+                    - mainnet
+                    example: preprod
+  /ballots:
+    get:
+      tags:
+      - Unified Ballots
+      summary: List ballots across all sources
+      description: '`Cache-Control: public, max-age=60`. Ballot definitions are largely
+
+        static once published; poll **/results** separately for live tallies.
+
+        '
+      parameters:
+      - in: query
+        name: voterType
+        schema:
+          type: string
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - upcoming
+          - live
+          - closed
+      - in: query
+        name: search
+        schema:
+          type: string
+      - in: query
+        name: page
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+      - in: query
+        name: source
+        description: Restrict to a single adapter (`legacy` or `hydra`).
+        schema:
+          type: string
+          enum:
+          - legacy
+          - hydra
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UnifiedBallot'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+  /ballots/{id}:
+    get:
+      tags:
+      - Unified Ballots
+      summary: Ballot detail (enriched from Hydra when source === "hydra")
+      description: 'Cache-Control varies by status: `closed` → `max-age=3600`, `live` →
+
+        `max-age=120`, `upcoming` → `max-age=30`. Results are **not** embedded —
+
+        call `/results/ballot/{id}` separately.
+
+        '
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Ballot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/UnifiedBallot'
+        '404':
+          description: Not found
+  /ballots/{id}/questions/{qid}/content:
+    get:
+      tags:
+      - Unified Ballots
+      - Audit
+      summary: Per-proposal canonical content bytes (audit chain-of-custody)
+      description: "Returns the byte-identical canonical JSON that `Proposal.contentHash`\nwas computed over. Auditors re-hash these bytes with `blake2b_256` to\nverify the proposal hasn't drifted since ballot-prepare time.\n\nPublic, unauthenticated by design — long-term auditability requires\nno gate. The chain of custody is:\n\n  on-chain (600) datum → ekklesia.merkleRoot\n    → IPFS-pinned ballot JSON (covers BallotQuestion.contentHash[n])\n      → per-proposal content blob (this endpoint).\n\nCache-Control mirrors `/ballots/{id}` and varies by ballot status.\n"
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: qid
+        required: true
+        description: Proposal id (must belong to the ballot).
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Canonical content bytes
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Canonical proposal content blob; byte stream is the authoritative artifact.
+        '404':
+          description: Ballot or proposal not found
+  /ballots/{id}/archive:
+    get:
+      tags:
+      - Unified Ballots
+      - Audit
+      summary: Full audit bundle (ballot + proposals + manifest + README)
+      description: 'One JSON file carrying every voter-facing committed field, a
+
+        per-file hash MANIFEST (blake2b_256 + sha256), and a README with
+
+        the verification recipe. Designed to be saved to disk and re-pinned
+
+        to IPFS by anyone who cares about long-term audit. Public,
+
+        unauthenticated.
+
+
+        The response is served with `Content-Disposition: attachment` so
+
+        browsers download instead of preview.
+
+        '
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Audit bundle
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - schemaVersion
+                - generatedAt
+                - ballot
+                - proposals
+                - manifest
+                - readme
+                properties:
+                  schemaVersion:
+                    type: string
+                    example: '1'
+                  generatedAt:
+                    type: string
+                    format: date-time
+                  ballot:
+                    type: object
+                    description: Voter-facing ballot summary (id, title, voter window, hydra anchors).
+                  proposals:
+                    type: object
+                    description: Map of proposalId → canonical content blob.
+                    additionalProperties:
+                      type: object
+                  manifest:
+                    type: array
+                    description: Per-file hash entries — `ballot.json` plus `proposals/<id>.json`.
+                    items:
+                      type: object
+                      required:
+                      - path
+                      - bytes
+                      - blake2b_256
+                      - sha256
+                      properties:
+                        path:
+                          type: string
+                        bytes:
+                          type: integer
+                        blake2b_256:
+                          type: string
+                        sha256:
+                          type: string
+                  readme:
+                    type: string
+                    description: Verification recipe + chain-of-custody notes.
+        '404':
+          description: Ballot not found
+  /ballots/{id}/certified:
+    get:
+      tags:
+      - Unified Ballots
+      - Results
+      summary: Authority certification state + version history
+      description: "Surfaces the currently-active `CertifiedSnapshot` (if any) plus the\nfull version history so the frontend can label results as\n\"Certified at version N by <authority>\" vs. \"Provisional\n(Hydra-final, not yet certified)\".\n\n- `certified: true`  → an authority snapshot is active; full\n  shape includes per-proposal tallies and snapshot metadata.\n- `certified: false` → no active certification. `narrative` may\n  still be set if a narrative-only publication exists.\n"
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certification state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    oneOf:
+                    - type: object
+                      required:
+                      - certified
+                      - history
+                      properties:
+                        certified:
+                          type: boolean
+                          enum:
+                          - false
+                        narrative:
+                          nullable: true
+                          type: object
+                          properties:
+                            url:
+                              type: string
+                            label:
+                              type: string
+                        history:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/CertifiedHistoryEntry'
+                    - type: object
+                      required:
+                      - certified
+                      - version
+                      - certifiedAt
+                      - history
+                      properties:
+                        certified:
+                          type: boolean
+                          enum:
+                          - true
+                        version:
+                          type: integer
+                        certifiedAt:
+                          type: string
+                          format: date-time
+                        snapshotUrl:
+                          type: string
+                          nullable: true
+                        snapshotHash:
+                          type: string
+                          nullable: true
+                        snapshotEpoch:
+                          type: integer
+                          nullable: true
+                        narrative:
+                          nullable: true
+                          type: object
+                          properties:
+                            url:
+                              type: string
+                            label:
+                              type: string
+                        perProposal:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              proposalId:
+                                type: string
+                              results:
+                                type: array
+                                items:
+                                  type: object
+                              resultsByGroup:
+                                type: object
+                        history:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/CertifiedHistoryEntry'
+        '404':
+          description: Ballot not found
+  /results/ballot/{ballotId}:
+    get:
+      tags:
+      - Results
+      summary: All Result rows for a ballot — anonymous, short-cached
+      description: |
+        Served with `Cache-Control: public, max-age=30` so clients can poll
+        cheaply while provisional tallies are refreshed periodically (roughly
+        every 10 minutes). Final tallies land the moment the voting authority
+        finalizes the ballot.
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Array of Result rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Result'
+  /results/proposal/{proposalId}:
+    get:
+      tags:
+      - Results
+      summary: Single proposal result — anonymous, short-cached
+      parameters:
+      - in: path
+        name: proposalId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Result'
+        '404':
+          description: No results yet
+  /votes/{ballotId}/draft:
+    post:
+      tags:
+      - Votes (v1)
+      summary: Create or resume a draft vote package (idempotent upsert)
+      description: "**Idempotent on (voter, ballot).** If the authenticated voter already\nhas a non-terminal VotePackage on this ballot, that package is\nreturned / updated in place — a fresh nonce is NOT reserved. Hydra\nrequires `signedPayload.nonce === currentVersion + 1` strictly, so\nburning a new nonce on every /draft click would drift the stored\nnonce ahead of Hydra's expected next value.\n\nBehavior:\n  - No active package exists → reserves nonce, creates VotePackage,\n    returns 201.\n  - Active package exists with matching selections → returns the\n    existing package unchanged (same packageId, same merkleRoot),\n    status 200.\n  - Active package exists with DIFFERENT selections AND no\n    signatures collected → updates signingPayload + merkleRoot +\n    voteHash in place; same packageId + nonce; status 200.\n  - Active package exists with DIFFERENT selections AND signatures\n    already collected (multisig partial) → 409\n    `PACKAGE_ALREADY_SIGNED`. Voter must DELETE and redraft.\n\nAbandoning an in-flight package (DELETE endpoint or TTL sweep)\nreleases the nonce so the next fresh /draft reuses the same value.\n"
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - votes
+              properties:
+                votes:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/VoteSelection'
+                responderRole:
+                  type: string
+                nativeScript:
+                  description: For multisig DReps — the native-script definition.
+                  type: object
+                calidusDeclaration:
+                  description: For CIP-151 pool hot-key votes.
+                  type: object
+      responses:
+        '200':
+          description: Existing active package returned or updated in place
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftResponse'
+        '201':
+          description: New draft created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftResponse'
+        '403':
+          description: Voter is not eligible
+        '409':
+          description: 'Package already has collected signatures; mutating selections
+
+            would invalidate cosigners. Call DELETE and redraft.
+
+            '
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                    - error
+                  code:
+                    type: string
+                    enum:
+                    - PACKAGE_ALREADY_SIGNED
+                  message:
+                    type: string
+                  package:
+                    $ref: '#/components/schemas/VotePackage'
+  /votes/{ballotId}/signature:
+    post:
+      tags:
+      - Votes (v1)
+      summary: Append a signature; submits to Hydra when threshold is met
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - packageId
+              - witness
+              properties:
+                packageId:
+                  type: string
+                witness:
+                  $ref: '#/components/schemas/CoseWitness'
+      responses:
+        '200':
+          description: Signature appended (and possibly submitted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  submitted:
+                    type: boolean
+                  package:
+                    $ref: '#/components/schemas/VotePackage'
+                  multisig:
+                    $ref: '#/components/schemas/MultisigStatus'
+                    nullable: true
+        '409':
+          description: Package in terminal state
+        '502':
+          description: Hydra submission failed
+  /votes/{ballotId}/mine:
+    get:
+      tags:
+      - Votes (v1)
+      summary: Rehydrate voter's current state on this ballot
+      description: '**CRITICAL SEMANTIC**: Hydra treats every submitted vote payload as the
+
+        voter''s COMPLETE final state — it does NOT merge with prior submissions.
+
+        If a voter previously voted on Proposals 2/3/4 and now submits a payload
+
+        containing only Proposal 5, the Hydra head erases the 2/3/4 votes.
+
+
+        To amend or add votes, the frontend rehydrates from
+
+        `confirmed.votes`, lets the user edit the selection set, then sends
+
+        the COMPLETE ballot to `/draft`. Whatever''s in the votes array IS the
+
+        full final state — removing a prior vote is simply omitting it.
+
+        The backend does not merge; the frontend owns the composition.
+
+
+        `confirmed` is the latest hydra-confirmed package (the on-chain source
+
+        of truth). `inFlight` lists packages still awaiting signatures,
+
+        submission, or that failed — when one of these submits it REPLACES the
+
+        confirmed state.
+
+        '
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Voter's per-ballot state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  ballotId:
+                    type: string
+                  confirmed:
+                    nullable: true
+                    description: 'Latest hydra-confirmed package. The rehydration source.
+
+                      `votes` is a map keyed by questionId; see MineVoteEntry
+
+                      for the per-entry shape. Null if the voter has never
+
+                      successfully submitted on this ballot.
+
+                      '
+                    type: object
+                    properties:
+                      packageId:
+                        type: string
+                      nonce:
+                        type: integer
+                      submittedAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      hydraTxId:
+                        type: string
+                        nullable: true
+                      votes:
+                        type: object
+                        additionalProperties:
+                          $ref: '#/components/schemas/MineVoteEntry'
+                  inFlight:
+                    type: array
+                    description: 'Packages not yet confirmed, newest first. Includes
+
+                      awaiting-signatures (multisig), awaiting-submission,
+
+                      draft, and failed.
+
+                      '
+                    items:
+                      type: object
+                      properties:
+                        packageId:
+                          type: string
+                        status:
+                          type: string
+                          enum:
+                          - draft
+                          - awaiting-signatures
+                          - awaiting-submission
+                          - failed
+                        nonce:
+                          type: integer
+                        createdAt:
+                          type: string
+                          format: date-time
+                        votes:
+                          type: object
+                          additionalProperties:
+                            $ref: '#/components/schemas/MineVoteEntry'
+                        multisig:
+                          nullable: true
+                          type: object
+                          properties:
+                            signaturesCollected:
+                              type: integer
+                            signaturesNeeded:
+                              type: integer
+                            satisfied:
+                              type: boolean
+                  summary:
+                    type: object
+                    properties:
+                      confirmed:
+                        type: integer
+                      awaitingSignatures:
+                        type: integer
+                      awaitingSubmission:
+                        type: integer
+                      draft:
+                        type: integer
+                      failed:
+                        type: integer
+        '401':
+          description: Auth required
+        '404':
+          description: Ballot not found or not Hydra-backed
+  /votes/{ballotId}/submit:
+    post:
+      tags:
+      - Votes (v1)
+      summary: Manual retry of submission for a package in awaiting-submission
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - packageId
+              properties:
+                packageId:
+                  type: string
+      responses:
+        '200':
+          description: Submission state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  package:
+                    $ref: '#/components/schemas/VotePackage'
+  /votes/{ballotId}/packages:
+    get:
+      tags:
+      - Votes (v1)
+      summary: List the session voter's vote packages on this ballot
+      description: 'By default returns only **active** packages — those in `draft`,
+
+        `awaiting-signatures`, or `awaiting-submission`. Use
+
+        `?includeTerminal=true` to broaden to terminal states
+
+        (`hydra-confirmed`, `failed`, `cancelled`, `abandoned`), or
+
+        `?status=<state>` for an exact-match filter.
+
+
+        Each package is enriched with the same derived fields the single-
+
+        package endpoint returns (`merkleRoot`, `signingPayloadHex`,
+
+        `signedPayloadJson`, `multisig`).
+
+        '
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: status
+        description: Exact-match status filter; takes precedence over `includeTerminal`.
+        schema:
+          type: string
+          enum:
+          - draft
+          - awaiting-signatures
+          - awaiting-submission
+          - broker-submitted
+          - hydra-confirmed
+          - failed
+          - cancelled
+          - abandoned
+      - in: query
+        name: includeTerminal
+        description: When `true`, include terminal-state packages in the default filter.
+        schema:
+          type: string
+          enum:
+          - 'true'
+          - 'false'
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+      responses:
+        '200':
+          description: Newest-first list of packages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VotePackage'
+                  pagination:
+                    type: object
+                    properties:
+                      limit:
+                        type: integer
+                      returned:
+                        type: integer
+        '401':
+          description: Auth required
+        '404':
+          description: Ballot not found or not Hydra-backed
+  /votes/{ballotId}/package/{packageId}:
+    get:
+      tags:
+      - Votes (v1)
+      summary: Current VotePackage state for the session voter
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: packageId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Package
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  package:
+                    $ref: '#/components/schemas/VotePackage'
+    delete:
+      tags:
+      - Votes (v1)
+      summary: Voter-initiated abandonment of an in-flight package
+      description: "Marks a non-terminal package as `abandoned` and releases its\nreserved nonce back to the voter's nonce pool. Load-bearing\nrelease: Hydra enforces `signedPayload.nonce === currentVersion + 1`\nstrictly, so abandoning without release would break the voter's\nnext submission.\n\n- 403 `FORBIDDEN` if the authenticated voter doesn't own the\n  package.\n- 404 `PACKAGE_NOT_FOUND` if no package with that id exists on\n  this ballot.\n- 409 `PACKAGE_TERMINAL` if the package is already in a\n  terminal state (hydra-confirmed, failed, cancelled,\n  abandoned).\n\nFor multisig: only the original drafter (the session voter\nwhose userId matches the package's userId) can delete. The\nTTL sweep also uses this semantic on long-idle packages.\n"
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: packageId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Package abandoned; nonce released.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                    - success
+                  package:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                        - abandoned
+                      nonce:
+                        type: integer
+        '403':
+          description: Not the package owner
+        '404':
+          description: Package not found
+        '409':
+          description: Package already in a terminal state
+  /proposals/{proposalId}:
+    get:
+      tags:
+      - Proposals
+      summary: Single proposal detail + parent ballot sidecar
+      description: 'Returns the full Proposal document plus a slim parent-ballot
+
+        projection (`_id`, `title`, `facets`, `status`, `source`,
+
+        `voterType`, `voteWeighted`) so the detail page can render
+
+        facet labels without a second roundtrip.
+
+        '
+      parameters:
+      - in: path
+        name: proposalId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Proposal + parent ballot sidecar
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    description: Full Proposal document.
+                  ballot:
+                    nullable: true
+                    type: object
+                    description: Slim parent-ballot projection.
+                    properties:
+                      _id:
+                        type: string
+                      title:
+                        type: string
+                      facets:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/FacetDefinition'
+                      status:
+                        type: string
+                        enum:
+                        - upcoming
+                        - live
+                        - closed
+                      source:
+                        type: string
+                        enum:
+                        - legacy
+                        - hydra
+                      voterType:
+                        type: string
+                      voteWeighted:
+                        type: boolean
+        '404':
+          description: Proposal not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                    - error
+                  code:
+                    type: string
+                    enum:
+                    - PROPOSAL_NOT_FOUND
+                  message:
+                    type: string
+  /proposals/ballot/{ballotId}:
+    get:
+      tags:
+      - Proposals
+      summary: List proposals for a ballot, with facet-driven sort + filter
+      description: 'Sort and filter keys must be declared on `Ballot.facets[]`.
+
+        Multi-value enum filters take CSV (e.g. `?filter[category]=a,b`);
+
+        OR semantics. Unknown keys and attempts to sort on a
+
+        non-sortable facet return 400. Facets are frozen once the
+
+        ballot goes live, so the filter UI can safely cache the
+
+        facet list for the ballot''s lifetime.
+
+        '
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: sort
+        description: 'Facet key to sort by. Must have `sortable: true`.'
+        schema:
+          type: string
+      - in: query
+        name: dir
+        schema:
+          type: string
+          enum:
+          - asc
+          - desc
+      - in: query
+        name: filter
+        style: deepObject
+        explode: true
+        description: 'Object of `filter[<facetKey>]=<csv>` filters. CSV split on
+
+          `,`; OR within a single facet; AND across facets.
+
+          '
+        schema:
+          type: object
+          additionalProperties:
+            type: string
+      - in: query
+        name: page
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 25
+      responses:
+        '200':
+          description: Paginated proposals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: array
+                    items:
+                      type: object
+                  pagination:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                  applied:
+                    type: object
+                    properties:
+                      filters:
+                        type: object
+                        additionalProperties:
+                          type: array
+                          items:
+                            type: string
+                      sort:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          direction:
+                            type: string
+                            enum:
+                            - asc
+                            - desc
+                          source:
+                            type: string
+                            enum:
+                            - default
+                            - fallback
+        '400':
+          description: Unknown facet key, unsortable sort target, or bad filter value
+        '404':
+          description: Ballot not found
+  /public/ballots:
+    get:
+      tags:
+      - Public
+      summary: Public unified ballot listing (API-key gated, rate-limited)
+      security:
+      - apiKeyHeader: []
+      - bearerAuth: []
+      parameters:
+      - in: query
+        name: source
+        schema:
+          type: string
+          enum:
+          - legacy
+          - hydra
+      - in: query
+        name: page
+        schema:
+          type: integer
+      - in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UnifiedBallot'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '401':
+          description: Missing or invalid API key
+        '403':
+          description: Scope mismatch
+        '429':
+          description: Rate limit exceeded
+  /public/ballots/{id}:
+    get:
+      tags:
+      - Public
+      summary: Public ballot detail
+      security:
+      - apiKeyHeader: []
+      - bearerAuth: []
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+  /public/results/ballot/{ballotId}:
+    get:
+      tags:
+      - Public
+      summary: All Result rows for a ballot (provisional + final)
+      security:
+      - apiKeyHeader: []
+      - bearerAuth: []
+      parameters:
+      - in: path
+        name: ballotId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Array of results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Result'
+  /public/results/proposal/{proposalId}:
+    get:
+      tags:
+      - Public
+      summary: Single proposal result
+      security:
+      - apiKeyHeader: []
+      - bearerAuth: []
+      parameters:
+      - in: path
+        name: proposalId
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: No results yet
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+    bearerAuth:
+      type: http
+      scheme: bearer
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: x-api-key
+  schemas:
+    UnifiedBallot:
+      type: object
+      properties:
+        id:
+          type: string
+        source:
+          type: string
+          enum:
+          - legacy
+          - hydra
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+          - upcoming
+          - live
+          - closed
+        voterType:
+          type: string
+        voterGroups:
+          type: array
+          description: |
+            Per-group eligibility + power-source declaration. Each entry pairs
+            a role key (drep / pool / stake) with a Hydra RoleWeighting value
+            (CredentialBased, StakeBased, or PledgeBased). Valid combinations:
+            drep → CredentialBased | StakeBased;
+            pool → CredentialBased | StakeBased | PledgeBased;
+            stake → StakeBased.
+          items:
+            type: object
+            required:
+            - group
+            - powerSource
+            properties:
+              group:
+                type: string
+                enum:
+                - drep
+                - pool
+                - stake
+              powerSource:
+                type: string
+                enum:
+                - CredentialBased
+                - StakeBased
+                - PledgeBased
+        voterDescription:
+          type: string
+        voteWeighted:
+          type: boolean
+        votePeriodStart:
+          type: string
+          format: date-time
+        votePeriodEnd:
+          type: string
+          format: date-time
+        voteFilters:
+          type: boolean
+        ipfsHash:
+          type: string
+          nullable: true
+        proposalCount:
+          type: integer
+          nullable: true
+        singleProposal:
+          type: string
+          nullable: true
+        hydra:
+          type: object
+          nullable: true
+          properties:
+            endpoint:
+              type: string
+              nullable: true
+            headId:
+              type: string
+              nullable: true
+            ballotCid:
+              type: string
+              nullable: true
+            instancePolicyId:
+              type: string
+              nullable: true
+            headInfo:
+              type: object
+              nullable: true
+            ballot:
+              type: object
+              nullable: true
+        provisionalResultsEnabled:
+          type: boolean
+        proposalSource:
+          nullable: true
+          description: 'Present when the ballot was imported from an upstream
+
+            proposals module. Null for scaffold-created or legacy
+
+            ballots.
+
+            '
+          type: object
+          properties:
+            moduleId:
+              type: string
+            moduleUrl:
+              type: string
+              nullable: true
+            externalBallotId:
+              type: string
+            version:
+              type: string
+              nullable: true
+            importedAt:
+              type: string
+              format: date-time
+            importMethod:
+              type: string
+              enum:
+              - push
+              - upload
+            importedBy:
+              type: string
+        facets:
+          type: array
+          description: Sort/filter dimensions declared for this ballot.
+          items:
+            $ref: '#/components/schemas/FacetDefinition'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    FacetDefinition:
+      type: object
+      required:
+      - key
+      - label
+      - type
+      description: 'Declares a sort/filter dimension for this ballot''s proposals.
+
+        Frozen at `status === "live"`. CSV is the wire format for
+
+        multi-value enums (option names must not contain `,`).
+
+        '
+      properties:
+        key:
+          type: string
+          pattern: ^[a-zA-Z0-9_-]+$
+        label:
+          type: string
+          maxLength: 120
+        type:
+          type: string
+          enum:
+          - enum
+          - number
+          - string
+          - boolean
+          - date
+        multi:
+          type: boolean
+          default: false
+          description: 'Only meaningful for `type:"enum"`. Implies `sortable:false`.
+
+            '
+        options:
+          type: array
+          description: Required when `type:"enum"`. Items must not contain `,`.
+          items:
+            type: string
+        unit:
+          type: string
+          nullable: true
+        sortable:
+          type: boolean
+          default: false
+        filterable:
+          type: boolean
+          default: true
+        defaultSort:
+          type: string
+          enum:
+          - asc
+          - desc
+          nullable: true
+          description: At most one facet may declare this.
+    Pagination:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        totalPages:
+          type: integer
+    VoteSelection:
+      description: 'Per-question vote payload submitted to `/votes/{ballotId}/draft`.
+
+        Mirrors the canonical wire shape: a voter either picks a selection
+
+        (and optional ranking / weights for ranked / weighted ballots) or
+
+        flags `abstain: true`. Abstain is rejected when the proposal sets
+
+        `requireAnswer: true`.
+
+
+        The Vote-collection''s `["abstain"]` sentinel is an internal legacy
+
+        collapse and is NOT part of the public contract.
+
+        '
+      oneOf:
+      - type: object
+        required:
+        - questionId
+        - selection
+        properties:
+          questionId:
+            type: string
+          selection:
+            type: array
+            items:
+              type: number
+          ranking:
+            type: array
+            items:
+              type: number
+          weights:
+            type: array
+            items:
+              type: object
+              properties:
+                option:
+                  type: number
+                weight:
+                  type: number
+      - type: object
+        required:
+        - questionId
+        - abstain
+        properties:
+          questionId:
+            type: string
+          abstain:
+            type: boolean
+            enum:
+            - true
+    MineVoteEntry:
+      description: 'Per-proposal vote-rehydration payload returned by
+
+        GET /votes/{ballotId}/mine. Mirrors the canonical wire shape the
+
+        voter submitted at /draft: either a selection array or an abstain
+
+        flag — never both.
+
+        '
+      oneOf:
+      - type: object
+        required:
+        - selection
+        properties:
+          selection:
+            type: array
+            items:
+              type: number
+            description: Option ids chosen for this proposal.
+        additionalProperties: false
+      - type: object
+        required:
+        - abstain
+        properties:
+          abstain:
+            type: boolean
+            enum:
+            - true
+            description: Voter abstained on this proposal.
+        additionalProperties: false
+    CoseWitness:
+      type: object
+      properties:
+        key:
+          type: string
+          description: signer key hash hex
+        coseSign1Hex:
+          type: string
+        coseKeyHex:
+          type: string
+        signature:
+          type: string
+    DraftResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        package:
+          type: object
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+            nonce:
+              type: integer
+        signingPayload:
+          type: object
+          description: Structured signing payload (`{ ballotId, nonce, votes }`) used to derive merkleRoot.
+        signingPayloadHex:
+          type: string
+          description: Hex of the UTF-8 bytes of `merkleRoot` — what `cardano-signer --data-hex` consumes.
+        merkleRoot:
+          type: string
+          description: '64-char hex string the voter must sign (UTF-8 bytes). Hydra
+
+            compares the COSE payload ASCII against this exact string when
+
+            verifying the witness, so signers must sign the hex characters
+
+            verbatim — not the underlying bytes.
+
+            '
+        signedPayloadJson:
+          type: string
+          description: Canonical JSON serialization of `signingPayload`, supplied so the frontend can display what the voter is signing without re-serializing.
+        prelimVoteHash:
+          type: string
+        multisig:
+          $ref: '#/components/schemas/MultisigStatus'
+          nullable: true
+    VotePackage:
+      description: 'Stored vote package, enriched on the way out with the derived fields
+
+        the frontend needs to display / replay the signing target. The four
+
+        enriched fields (`merkleRoot`, `signingPayloadHex`,
+
+        `signedPayloadJson`, `multisig`) are derived from the stored
+
+        `signingPayload` + `nativeScript` whenever the package is returned
+
+        by `/draft`, `/signature`, `/submit`, `/package/{id}`, `/packages`,
+
+        or `/mine`.
+
+        '
+      type: object
+      properties:
+        _id:
+          type: string
+        status:
+          type: string
+          enum:
+          - draft
+          - awaiting-signatures
+          - awaiting-submission
+          - broker-submitted
+          - hydra-confirmed
+          - failed
+          - cancelled
+          - abandoned
+        nonce:
+          type: integer
+        voteHash:
+          type: string
+          nullable: true
+        hydraTxId:
+          type: string
+          nullable: true
+        ipfsCid:
+          type: string
+          nullable: true
+        confirmedAt:
+          type: string
+          format: date-time
+          nullable: true
+        signatures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoseWitness'
+        merkleRoot:
+          type: string
+          nullable: true
+          description: Derived; 64-char hex blake2b_256 over the canonical signingPayload JSON.
+        signingPayloadHex:
+          type: string
+          nullable: true
+          description: Derived; hex of the UTF-8 bytes of `merkleRoot`.
+        signedPayloadJson:
+          type: string
+          nullable: true
+          description: Derived; canonical JSON serialization of `signingPayload`.
+        multisig:
+          $ref: '#/components/schemas/MultisigStatus'
+          description: Derived; populated only when the package has a `nativeScript`. Null otherwise.
+    MultisigStatus:
+      type: object
+      properties:
+        required:
+          type: integer
+        eligibleKeys:
+          type: array
+          items:
+            type: string
+        outstandingKeys:
+          type: array
+          items:
+            type: string
+        satisfied:
+          type: boolean
+    CertifiedHistoryEntry:
+      type: object
+      description: One row of a ballot's certification history (newest-first ordering).
+      properties:
+        version:
+          type: integer
+        submittedAt:
+          type: string
+          format: date-time
+        submittedBy:
+          type: string
+        source:
+          type: string
+          description: Origin of the certification (e.g. "api", "chain").
+        chainTxHash:
+          type: string
+          nullable: true
+        snapshotUrl:
+          type: string
+          nullable: true
+        snapshotHash:
+          type: string
+          nullable: true
+        narrativeOnly:
+          type: boolean
+        narrative:
+          nullable: true
+          type: object
+          properties:
+            url:
+              type: string
+            label:
+              type: string
+    Result:
+      type: object
+      properties:
+        proposalId:
+          type: string
+        ballotId:
+          type: string
+          nullable: true
+        source:
+          type: string
+          enum:
+          - provisional
+          - final
+        ballotSource:
+          type: string
+          enum:
+          - legacy
+          - hydra
+        finalizedAt:
+          type: string
+          format: date-time
+          nullable: true
+        hydraEvidenceCid:
+          type: string
+          nullable: true
+          description: IPFS CID of the directory of per-voter evidence files.
+        hydraResultsCid:
+          type: string
+          nullable: true
+          description: IPFS CID of the compact results JSON.
+        hydraFinalizeTxHash:
+          type: string
+          nullable: true
+          description: Hydra tx hash from the in-head settlement transaction that finalized this ballot.
+        hydraResultsHash:
+          type: string
+          nullable: true
+          description: blake2b_256 of the canonical results JSON — anchored on the (601) datum for on-chain verification.
+        hydraEvidenceMerkleRoot:
+          type: string
+          nullable: true
+          description: Merkle root over the per-voter evidence files in the IPFS directory.
+        hydraTotalVoters:
+          type: integer
+          nullable: true
+          description: Number of voter tokens included in the final tally.
+        hydraExcludedVoters:
+          type: array
+          description: Voter tokens excluded from the tally (evidence mismatch / missing). Each entry carries tokenName and reason.
+          items:
+            type: object
+            properties:
+              tokenName:
+                type: string
+              reason:
+                type: string
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                oneOf:
+                - type: number
+                - type: string
+              label:
+                type: string
+              count:
+                type: integer
+              votingPower:
+                type: number
+        resultsByGroup:
+          type: object
+          nullable: true
