@@ -43,12 +43,20 @@ impl EkklesiaClient {
 
     // ── Votes ─────────────────────────────────────────────────────────────────
 
+    /// List vote cycles. Query string assembled via reqwest's `.query()` so
+    /// values percent-encode correctly — see [`Self::list_proposals`] for
+    /// the rationale (issue #7 standardization).
     pub async fn list_votes(&self, page: u32, limit: u32) -> Result<Page<Vote>> {
-        self.get(&format!(
-            "{}/api/v0/votes?page={page}&limit={limit}",
-            self.base_url
-        ))
-        .await
+        let url = format!("{}/api/v0/votes", self.base_url);
+        let page_str = page.to_string();
+        let limit_str = limit.to_string();
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("page", page_str.as_str()), ("limit", limit_str.as_str())])
+            .send()
+            .await?;
+        self.parse(resp).await
     }
 
     pub async fn get_vote(&self, id: &str) -> Result<Vote> {
@@ -127,30 +135,51 @@ impl EkklesiaClient {
 
     // ── Comments ──────────────────────────────────────────────────────────────
 
+    /// List top-level comments on a proposal. Query string via `.query()`
+    /// (issue #7 standardization). `proposal_id` is a 24-hex `ObjectId`
+    /// today — encoding-safe — but keeping the style consistent across all
+    /// `list_*` methods closes the door on the next contributor introducing
+    /// a user-controlled param into a string-concat URL.
     pub async fn list_comments(
         &self,
         proposal_id: &str,
         page: u32,
         limit: u32,
     ) -> Result<Page<Comment>> {
-        self.get(&format!(
-            "{}/api/v0/comments?proposal={proposal_id}&page={page}&limit={limit}",
-            self.base_url
-        ))
-        .await
+        let url = format!("{}/api/v0/comments", self.base_url);
+        let page_str = page.to_string();
+        let limit_str = limit.to_string();
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[
+                ("proposal", proposal_id),
+                ("page", page_str.as_str()),
+                ("limit", limit_str.as_str()),
+            ])
+            .send()
+            .await?;
+        self.parse(resp).await
     }
 
+    /// List replies under a specific comment. See [`Self::list_comments`]
+    /// for the encoding rationale (issue #7).
     pub async fn list_comment_replies(
         &self,
         comment_id: &str,
         page: u32,
         limit: u32,
     ) -> Result<Page<Comment>> {
-        self.get(&format!(
-            "{}/api/v0/comments/{comment_id}/replies?page={page}&limit={limit}",
-            self.base_url
-        ))
-        .await
+        let url = format!("{}/api/v0/comments/{comment_id}/replies", self.base_url);
+        let page_str = page.to_string();
+        let limit_str = limit.to_string();
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("page", page_str.as_str()), ("limit", limit_str.as_str())])
+            .send()
+            .await?;
+        self.parse(resp).await
     }
 
     pub async fn create_comment(&self, req: &CreateCommentRequest) -> Result<Value> {
