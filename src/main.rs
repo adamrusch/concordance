@@ -560,16 +560,15 @@ mod tests {
     use std::io::Cursor;
     use tempfile::NamedTempFile;
 
-    /// Tests for `resolve_jwt_input` — the JWT source-resolution helper that
-    /// implements the security contract for issue #5. The test names encode
-    /// the precedence order: jwt_file > stdin > literal-with-deprecation >
-    /// CONCORDANCE_JWT env > error.
-    ///
-    /// The `CONCORDANCE_JWT` cases set and clear the env var under a single
-    /// process-wide mutex because cargo runs tests in parallel; a leaked env
-    /// var would taint sibling tests. Tests that don't need it call
-    /// `clear_env` defensively at the top.
-
+    // Tests for `resolve_jwt_input` — the JWT source-resolution helper that
+    // implements the security contract for issue #5. The test names encode
+    // the precedence order: jwt_file > stdin > literal-with-deprecation >
+    // CONCORDANCE_JWT env > error.
+    //
+    // The `CONCORDANCE_JWT` cases set and clear the env var under a single
+    // process-wide mutex because cargo runs tests in parallel; a leaked env
+    // var would taint sibling tests. Tests that don't need it call
+    // `clear_env` defensively at the top.
     use std::sync::Mutex;
     static ENV_MU: Mutex<()> = Mutex::new(());
     const ENV_VAR: &str = "CONCORDANCE_JWT";
