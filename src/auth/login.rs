@@ -42,12 +42,34 @@
 //!
 //! CIP-30's `signData(addr, dataHex)` returns
 //! `DataSignature = { signature: hex, key: hex }`, both CBOR-encoded
-//! COSE_Sign1 / COSE_Key structures. Ekklesia's spec (see
-//! `docs/upstream/proposals-openapi.yaml`) only says "Hex-encoded
-//! signature produced by the wallet". Empirically the API accepts
-//! `signature.signature` (the COSE_Sign1 hex) as the `signature`
-//! field; the `key` is sent alongside on a separate field per the
-//! reference implementation. We mirror that contract here.
+//! COSE_Sign1 / COSE_Key structures. The vendored proposals spec
+//! describes the request body's `signature` as a string ("Hex-encoded
+//! signature produced by the wallet"), which is misleading: the
+//! deployed Hydra-Voting server expects `signature` to be a JSON
+//! **object** carrying the wallet's `{signature, key}` pair verbatim.
+//!
+//! The authoritative shape lives in three places, not in the
+//! vendored proposals spec:
+//!
+//! * `api/voting/openapi.v0.yaml` upstream, where the request body
+//!   references `#/components/schemas/Signature` — defined as
+//!   `type: object, additionalProperties: true` (the spec's
+//!   polite way of saying "opaque blob").
+//! * The `verifySignature` helper in `lerna-labs/ekklesia-helpers`
+//!   (`src/crypto/verifySignature.ts`), which expects a
+//!   `SignatureObject` with `signature?`, `key?`, `publicKey?`,
+//!   `COSE_Sign1_hex?`, `COSE_Key_hex?` fields and CBOR-decodes
+//!   the first two to recognise the wallet flow.
+//! * The Hydra-Voting frontend bundle, which constructs the PUT
+//!   body as `{signerAddress, signType, signature: <wallet
+//!   result>}` — i.e. the raw `signData` return value is dropped
+//!   in as the `signature` field.
+//!
+//! Sending `signature` and `key` as **flat sibling fields** at the
+//! top level (which the v1 proposals spec's terser wording invites)
+//! makes the server reject the request with
+//! `"Authentication failed. Please request a new nonce and try again."`
+//! — the nonce was fine; the wire shape was the problem.
 
 use std::io::{Cursor, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -840,12 +862,12 @@ async fn post_session(base_url: &str, stake_addr: &str) -> anyhow::Result<String
 }
 
 /// `PUT /api/v0/session` — verify the wallet signature and return a
-/// JWT. The `signature` arg is the hex-encoded COSE_Sign1 payload
-/// returned by CIP-30's `signData` (i.e. `result.signature`); `key`
-/// is the COSE_Key from the same call, sent as a sibling field per
-/// the Hydra Voting reference implementation. The spec accepts the
-/// `key` as optional but in practice all production instances expect
-/// it for non-Ed25519 stake-key signatures.
+/// JWT. `signature` is the hex-encoded COSE_Sign1 payload returned
+/// by CIP-30's `signData` (i.e. `result.signature`); `key` is the
+/// COSE_Key from the same call. Both go inside a nested `signature`
+/// object on the wire — see the module-level docs for why the flat
+/// shape the proposals spec implies does **not** work against the
+/// deployed server.
 async fn put_session(
     base_url: &str,
     stake_addr: &str,
@@ -853,14 +875,20 @@ async fn put_session(
     key: Option<&str>,
 ) -> anyhow::Result<AuthToken> {
     let url = format!("{}/api/v0/session", base_url.trim_end_matches('/'));
-    let mut body = json!({
+    // The `signature` field is an OBJECT mirroring the CIP-30
+    // `DataSignature` return value: `{signature: <hex>, key: <hex>}`.
+    // The Hydra-Voting frontend passes the wallet's result through
+    // verbatim; `verifySignature` in ekklesia-helpers then CBOR-
+    // decodes both fields to recognise it as a COSE witness.
+    let mut sig_obj = json!({ "signature": signature });
+    if let Some(k) = key {
+        sig_obj["key"] = json!(k);
+    }
+    let body = json!({
         "signerAddress": stake_addr,
         "signType": "stake",
-        "signature": signature,
+        "signature": sig_obj,
     });
-    if let Some(k) = key {
-        body["key"] = json!(k);
-    }
     let resp = unauthenticated_client(base_url)?
         .put(&url)
         .json(&body)

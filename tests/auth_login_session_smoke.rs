@@ -408,8 +408,18 @@ fn auth_login_full_session_flow_persists_jwt() {
     let put_json: serde_json::Value = serde_json::from_str(&put_body).expect("put body json");
     assert_eq!(put_json["signerAddress"], stake);
     assert_eq!(put_json["signType"], "stake");
-    assert_eq!(put_json["signature"], signature);
-    assert_eq!(put_json["key"], key);
+    // `signature` is a nested object carrying the wallet's CIP-30
+    // `DataSignature` verbatim (`{signature, key}`), not a flat hex
+    // string. See the module-level docs in `src/auth/login.rs` for
+    // why the proposals OpenAPI spec's wording is misleading here.
+    assert_eq!(put_json["signature"]["signature"], signature);
+    assert_eq!(put_json["signature"]["key"], key);
+    // No flat `key` sibling — that's the old (broken) shape.
+    assert!(
+        put_json.get("key").is_none(),
+        "PUT /session must not carry a top-level `key`; the COSE key \
+         goes inside the `signature` object. body: {put_body}",
+    );
 
     // 4. Listener must NOT auto-shutdown: the user still needs to copy
     //    the token from the page. Send /done explicitly to unblock.
