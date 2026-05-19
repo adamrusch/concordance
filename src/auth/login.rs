@@ -225,18 +225,12 @@ struct LoginContext {
     session_token: String,
     bound_port: u16,
     base_url: String,
-    /// Carried for diagnostic logging and future re-introduction of
-    /// auto-store. The copy-paste UX in v0.4.1+ deliberately does not
-    /// touch the store from this code path — the user finalizes via
-    /// `auth set --jwt -` in chat — but if/when the signing flow is
-    /// proven stable, a `--no-paste` flag can re-enable auto-store
-    /// against this same field.
-    #[allow(dead_code)]
+    /// Instance the JWT will be persisted under. Used by the `/signed`
+    /// success path to call `store.set_token(instance_name, jwt)`.
     instance_name: String,
     rt_handle: Handle,
-    /// Same rationale as `instance_name`: kept so re-enabling
-    /// auto-store doesn't need a struct change.
-    #[allow(dead_code)]
+    /// Persistent token store. Set by the success path of `/signed`
+    /// once `PUT /session` returns a valid JWT.
     store: Store,
 }
 
@@ -674,24 +668,33 @@ fn handle_signed(
         .rt_handle
         .block_on(put_session(&ctx.base_url, &stake_addr, &signature, key.as_deref()));
 
-    // Copy-paste UX (v0.4.1+): instead of auto-storing the JWT, we
-    // return it (or the raw error) to the page, which renders a
-    // copyable blob the user pastes back into their chat session.
-    // The chat agent then finalizes with `auth set --jwt -`. This
-    // gives us a forward path while signature-verification quirks
-    // are still being chased empirically.
+    // v0.4.1 (post-wire-shape-fix): auto-store the JWT and auto-shutdown
+    // on success. The interim copy-paste UX was a forcing function while
+    // we debugged the nested-signature wire shape; now that the flow is
+    // proven against live Hydra Voting, the natural UX is "click sign,
+    // see ✓, done." The failure path retains the diagnostic blob — both
+    // for the rare wire/server change that breaks us again, and for
+    // human-readable post-mortems of expired-nonce / rate-limit cases.
     match result {
         Ok(auth) => {
-            // Still validate the JWT so a malformed token from a
-            // misbehaving server shows up as a session error before
-            // the user copy-pastes garbage into the chat.
             match inspect_jwt(&auth.token) {
                 Ok(info) => {
+                    if let Err(e) = ctx.store.set_token(&ctx.instance_name, &auth.token) {
+                        let msg = format!("failed to persist JWT: {e}");
+                        let mut guard = state.lock().expect("login state mutex poisoned");
+                        guard.stage = FlowStage::VerifyError(msg.clone());
+                        let _ = respond_json(
+                            req,
+                            StatusCode(500),
+                            &json!({ "ok": false, "error": msg }).to_string(),
+                        );
+                        return;
+                    }
                     let status_line = info.status_line();
                     let user_id = info.user_id.unwrap_or_else(|| auth.user_id.clone());
                     let _ = writeln!(
                         std::io::stderr(),
-                        "concordance: server returned JWT for {} ({}). Copy the value from the helper page and finalize with `auth set --jwt -`.",
+                        "concordance: signed in as {} ({})",
                         user_id,
                         status_line,
                     );
@@ -700,19 +703,26 @@ fn handle_signed(
                         guard.user_id = Some(user_id.clone());
                         guard.stage = FlowStage::Verified;
                     }
+                    // Auto-shutdown once the JWT is stored. The page's
+                    // success state still renders, and the user can
+                    // close the tab at their leisure — the listener
+                    // is already gone.
+                    done.store(true, Ordering::Release);
                     let _ = respond_json(
                         req,
                         StatusCode(200),
                         &json!({
                             "ok": true,
-                            "token": auth.token,
                             "userId": user_id,
-                            "expiresIn": auth.expires_in,
                         })
                         .to_string(),
                     );
                 }
                 Err(e) => {
+                    // Server handed us a JWT we can't parse. Surface
+                    // the raw token in the response body so the user
+                    // can still copy-paste it manually if they want
+                    // to try `auth set --jwt -` directly.
                     let msg = format!("API returned a malformed JWT: {e}");
                     let mut guard = state.lock().expect("login state mutex poisoned");
                     guard.stage = FlowStage::VerifyError(msg.clone());
@@ -731,16 +741,13 @@ fn handle_signed(
             }
         }
         Err(e) => {
-            // Pass the raw upstream failure through to the page so the
-            // user can copy it back to the chat for diagnosis. This is
-            // the surface that catches signing-format mismatches, CORS
-            // quirks, server errors, etc.
-            //
-            // Include the wire data (signature, key, stake address,
-            // and dataHex) the wallet+CLI produced. This lets the
-            // chat agent decode the COSE_Sign1 offline and inspect
-            // the protected header, hash flag, payload, etc. without
-            // needing another round-trip with new diagnostic logging.
+            // The failure path keeps the rich diagnostic blob: signature
+            // + key + stake_addr + dataHex + wallet_name. With the
+            // nested-signature wire shape proven, most remaining failure
+            // modes here are nonce-expiry / rate-limit / future server
+            // changes — but if a new wire-format quirk emerges, the
+            // captured bytes let the chat agent decode the COSE
+            // structure offline without another wallet round-trip.
             let msg = format!("PUT /session failed: {e}");
             let _ = writeln!(std::io::stderr(), "concordance: {msg}");
             let (data_hex_snapshot, wallet_name_snapshot) = {
@@ -769,9 +776,6 @@ fn handle_signed(
             );
         }
     }
-    // No auto-store, no auto-shutdown on this path; the page POSTs
-    // /done explicitly once the user has copied the value.
-    let _ = done; // keep the binding silenced; /done still closes the listener
 }
 
 /// `POST /done` — page tells the CLI it can shut the listener down.

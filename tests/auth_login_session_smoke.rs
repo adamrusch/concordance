@@ -384,6 +384,9 @@ fn auth_login_full_session_flow_persists_jwt() {
     // and DOES NOT auto-shutdown. The page renders the token for the
     // user to copy back to the chat agent, which finalizes with
     // `auth set --jwt -`.
+    // v0.4.1+: success response carries `{ok: true, userId}` only —
+    // the JWT is auto-stored, so the page no longer needs to receive
+    // it. The failure path still includes diagnostic data.
     assert_eq!(status, 200, "POST /signed must be 200, body: {body:?}");
     let signed_resp: serde_json::Value =
         serde_json::from_str(&body).expect("/signed body json");
@@ -393,8 +396,8 @@ fn auth_login_full_session_flow_persists_jwt() {
         "stake1u8td6l5sakfcpm6uz85v942xu5f76kzj9qz33c7986d0dxc3sxnvt"
     );
     assert!(
-        signed_resp["token"].as_str().is_some_and(|t| !t.is_empty()),
-        "/signed should return the JWT for the page to display: {body:?}"
+        signed_resp.get("token").is_none(),
+        "v0.4.1 success body must NOT echo the JWT — it's auto-stored. body: {body:?}"
     );
 
     // Verify the CLI's PUT /session body matches the spec contract.
@@ -421,29 +424,31 @@ fn auth_login_full_session_flow_persists_jwt() {
          goes inside the `signature` object. body: {put_body}",
     );
 
-    // 4. Listener must NOT auto-shutdown: the user still needs to copy
-    //    the token from the page. Send /done explicitly to unblock.
-    let (s, _) =
-        http_post_json(port, "/done", &format!(r#"{{"sessionToken":"{token}"}}"#)).unwrap();
-    assert_eq!(s, 200);
+    // 4. Listener auto-shuts on success — the CLI flips `done` once
+    //    the JWT has been persisted. No /done POST needed; subprocess
+    //    exits on its own.
     let exit = child
         .wait_timeout_or_kill(Duration::from_secs(5))
-        .expect("subprocess should exit after /done");
+        .expect("subprocess should auto-exit after /signed success");
     assert!(exit.success(), "exit {exit:?}");
 
-    // 5. stderr should mention the server returned a JWT and point
-    //    the user at the `auth set --jwt -` finalization step.
+    // 5. stdout should mention "signed in" + the stake address and
+    //    point at `auth status` for confirmation.
     let mut stdout_buf = String::new();
     let mut stdout = stdout;
     stdout.read_to_string(&mut stdout_buf).expect("read stdout");
     assert!(
-        stdout_buf.contains("server returned JWT") || stdout_buf.contains("auth set"),
-        "stdout should mention the JWT or the auth-set hint: {stdout_buf:?}"
+        stdout_buf.contains("signed in"),
+        "stdout should mention signed-in state: {stdout_buf:?}"
+    );
+    assert!(
+        stdout_buf.contains(stake),
+        "stdout should mention stake addr: {stdout_buf:?}"
     );
 
-    // 6. JWT must NOT have been auto-persisted — the user finalizes
-    //    via `auth set --jwt -`. `concordance auth status` should
-    //    report no token in the tempdir-backed store.
+    // 6. JWT must be auto-persisted into the tempdir-backed store.
+    //    `concordance auth status` should report "valid" against the
+    //    +24h expiry on the mock-issued JWT.
     let status_out = Command::new(env!("CARGO_BIN_EXE_concordance"))
         .args(["auth", "status"])
         .env_clear()
@@ -453,8 +458,14 @@ fn auth_login_full_session_flow_persists_jwt() {
         .output()
         .expect("run concordance auth status");
     assert!(
-        !status_out.status.success(),
-        "auth status should exit nonzero — copy-paste UX does NOT auto-persist"
+        status_out.status.success(),
+        "auth status failed: {:?}",
+        String::from_utf8_lossy(&status_out.stderr)
+    );
+    let status_stdout = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        status_stdout.contains("valid"),
+        "auth status stdout should mention 'valid', got: {status_stdout:?}"
     );
 }
 

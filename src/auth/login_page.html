@@ -464,15 +464,17 @@ $("#confirm-stake").addEventListener("click", async () => {
     return;
   }
 
-  if (body && body.ok && body.token) {
+  if (body && body.ok) {
+    // v0.4.1+: CLI auto-stored the JWT. The page just needs to
+    // confirm success and tell the user they can close the tab.
     setStepState("step-3", "done");
-    showCopyableResult({
-      title: "✓ Signed in — copy this JWT and paste it into your Claude chat",
-      hint: "The chat agent will finalize with `concordance auth set --jwt -`.",
-      value: body.token,
-      kind: "success",
-    });
+    showSuccessResult(body.userId || "your stake address");
   } else {
+    // Failure paths keep the copyable blob — both for users who
+    // want to retry manually with `auth set --jwt -` (in the rare
+    // case the server returned a JWT we couldn't parse) and for
+    // pasting back to the chat agent to diagnose a wire-format /
+    // nonce-expiry / rate-limit issue.
     const errorBlob = JSON.stringify(body || { error: `HTTP ${putResp.status}` }, null, 2);
     showCopyableResult({
       title: "Sign-in failed — copy this and paste it into your Claude chat",
@@ -482,6 +484,24 @@ $("#confirm-stake").addEventListener("click", async () => {
     });
   }
 });
+
+/// Success state: the CLI has already stored the JWT. Render a clean
+/// confirmation; no copy button needed. The listener is already
+/// shutting down (the CLI auto-flips `done` after persist), so we
+/// don't even need a "Done" button.
+function showSuccessResult(userId) {
+  const status = $("#step-3-status");
+  setStatus(status, "");
+  const panel = document.createElement("div");
+  panel.className = "result-panel success";
+  panel.innerHTML = `
+    <h3>✓ Signed in</h3>
+    <p>The JWT for <code></code> has been stored locally. You can close this tab.</p>
+    <p class="result-feedback">Concordance is ready — go back to your chat session.</p>
+  `;
+  panel.querySelector("code").textContent = userId;
+  status.appendChild(panel);
+}
 
 /// Render the result panel: title + hint + textarea (read-only,
 /// pre-selected) + Copy button + Done button (POSTs /done to shut
