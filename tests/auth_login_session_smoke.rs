@@ -365,7 +365,7 @@ fn auth_login_full_session_flow_persists_jwt() {
         .expect("CLI should have POSTed /session");
     let post_json: serde_json::Value = serde_json::from_str(&post_body).expect("post body json");
     assert_eq!(post_json["signerAddress"], stake);
-    assert_eq!(post_json["signType"], "cip-8");
+    assert_eq!(post_json["signType"], "stake");
 
     // 3. Wallet would now signData(stakeAddr, dataHex) and POST /signed.
     //    We simulate that with a canned hex signature.
@@ -397,7 +397,7 @@ fn auth_login_full_session_flow_persists_jwt() {
         .expect("CLI should have PUT /session");
     let put_json: serde_json::Value = serde_json::from_str(&put_body).expect("put body json");
     assert_eq!(put_json["signerAddress"], stake);
-    assert_eq!(put_json["signType"], "cip-8");
+    assert_eq!(put_json["signType"], "stake");
     assert_eq!(put_json["signature"], signature);
     assert_eq!(put_json["key"], key);
 

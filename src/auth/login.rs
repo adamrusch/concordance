@@ -768,7 +768,7 @@ async fn post_session(base_url: &str, stake_addr: &str) -> anyhow::Result<String
     let url = format!("{}/api/v0/session", base_url.trim_end_matches('/'));
     let body = json!({
         "signerAddress": stake_addr,
-        "signType": "cip-8",
+        "signType": "stake",
     });
     let resp = unauthenticated_client(base_url)?
         .post(&url)
@@ -806,7 +806,7 @@ async fn put_session(
     let url = format!("{}/api/v0/session", base_url.trim_end_matches('/'));
     let mut body = json!({
         "signerAddress": stake_addr,
-        "signType": "cip-8",
+        "signType": "stake",
         "signature": signature,
     });
     if let Some(k) = key {
