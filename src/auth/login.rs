@@ -179,6 +179,14 @@ struct LoginState {
     wallet_name: Option<String>,
     /// `userId` from the issued JWT, set on `PUT /session` success.
     user_id: Option<String>,
+    /// The `dataHex` nonce returned by `POST /session`. Kept on the
+    /// state (in addition to inside `FlowStage::ChallengeReady`) so
+    /// the `/signed` failure path can include it in the diagnostic
+    /// blob the page renders. The signing-verification step is the
+    /// most failure-prone part of the flow, and the dataHex is one
+    /// of the three values needed (alongside `signature` and `key`)
+    /// to debug a verification miss offline.
+    data_hex: Option<String>,
     /// Tracks where the wallet-signing handshake is — drives the
     /// `/challenge` polling endpoint's responses.
     stage: FlowStage,
@@ -524,6 +532,7 @@ fn handle_init(mut req: Request, ctx: &Arc<LoginContext>, state: &Arc<Mutex<Logi
                     data_hex.len()
                 );
                 let mut guard = state_clone.lock().expect("login state mutex poisoned");
+                guard.data_hex = Some(data_hex.clone());
                 guard.stage = FlowStage::ChallengeReady { data_hex };
             }
             Err(e) => {
@@ -704,14 +713,37 @@ fn handle_signed(
             // user can copy it back to the chat for diagnosis. This is
             // the surface that catches signing-format mismatches, CORS
             // quirks, server errors, etc.
+            //
+            // Include the wire data (signature, key, stake address,
+            // and dataHex) the wallet+CLI produced. This lets the
+            // chat agent decode the COSE_Sign1 offline and inspect
+            // the protected header, hash flag, payload, etc. without
+            // needing another round-trip with new diagnostic logging.
             let msg = format!("PUT /session failed: {e}");
             let _ = writeln!(std::io::stderr(), "concordance: {msg}");
-            let mut guard = state.lock().expect("login state mutex poisoned");
-            guard.stage = FlowStage::VerifyError(msg.clone());
+            let (data_hex_snapshot, wallet_name_snapshot) = {
+                let guard = state.lock().expect("login state mutex poisoned");
+                (guard.data_hex.clone(), guard.wallet_name.clone())
+            };
+            {
+                let mut guard = state.lock().expect("login state mutex poisoned");
+                guard.stage = FlowStage::VerifyError(msg.clone());
+            }
             let _ = respond_json(
                 req,
                 StatusCode(200),
-                &json!({ "ok": false, "error": msg }).to_string(),
+                &json!({
+                    "ok": false,
+                    "error": msg,
+                    "diagnostic": {
+                        "stake_addr": stake_addr,
+                        "data_hex": data_hex_snapshot,
+                        "signature": signature,
+                        "key": key,
+                        "wallet_name": wallet_name_snapshot,
+                    }
+                })
+                .to_string(),
             );
         }
     }
