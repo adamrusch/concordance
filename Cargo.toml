@@ -17,6 +17,14 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 fs2 = "0.4"
+# `open` 5.x is the cross-platform browser launcher (uses `open` on macOS,
+# `xdg-open` on Linux, `start` on Windows). Used by `auth login` to take
+# the user to the localhost helper page.
+open = "5"
+# `rand` provides the CSPRNG for the per-session token that gates the
+# localhost endpoints. `getrandom` is already in the tree transitively
+# but `rand`'s thread_rng + Alphanumeric is the ergonomic surface here.
+rand = "0.8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
@@ -30,6 +38,11 @@ serde_json = "1"
 serde_yaml = "0.9"
 tempfile = "3"
 thiserror = "2"
+# `tiny_http` is the localhost listener for the `auth login` flow.
+# Single dependency, blocking server in a dedicated OS thread — adequate
+# for a one-shot 3-route handshake. Avoids pulling in axum's full
+# framework (tower, hyper, etc.) for one short-lived listener.
+tiny_http = "0.12"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"

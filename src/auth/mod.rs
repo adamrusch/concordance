@@ -1,9 +1,17 @@
-//! JWT inspection and validation.
+//! Auth subsystem: JWT inspection/validation plus the wallet-driven
+//! `concordance auth login` flow.
+//!
+//! The JWT helpers stay in this file (their contract is documented just
+//! below); the localhost-mediated login lives in [`login`] as a sibling
+//! module so the listener, helper HTML, and tests sit next to each
+//! other without polluting this file's surface.
 //!
 //! Ekklesia tokens are standard JWTs carried in the `Authorization: Bearer`
 //! header and the `token` cookie. We only decode the payload to read the `exp`
 //! claim — signature verification is intentionally omitted because the server
 //! enforces validity; we just want to detect expiry before making a request.
+
+pub mod login;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};

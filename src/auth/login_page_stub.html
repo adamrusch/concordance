@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concordance — session active</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.5 system-ui, -apple-system, sans-serif;
+    max-width: 36rem;
+    margin: 6rem auto 2rem;
+    padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+  p { color: #555; }
+  @media (prefers-color-scheme: dark) { p { color: #aaa; } }
+  button {
+    margin-top: 1.5rem;
+    padding: 0.75em 1.25em;
+    font: inherit;
+    border: 1px solid currentColor;
+    border-radius: 0.5em;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(127,127,127,0.1); }
+  .status { margin-top: 1rem; min-height: 1.5em; font-style: italic; }
+  code { font-family: ui-monospace, SFMono-Regular, monospace; }
+</style>
+</head>
+<body>
+<h1>Concordance — session active</h1>
+<p>
+  This page is a stub. In <code>v0.4.0</code> it will host the Cardano wallet
+  connect + signing flow that completes <code>concordance auth login</code>.
+  For now it exists to let the listener shut down cleanly from a real browser
+  click, which lets the integration test exercise the end-to-end loop.
+</p>
+<p>
+  Click the button to signal the CLI that the listener can shut down. (No
+  wallet interaction yet — that lands in the next commits.)
+</p>
+<button id="done">Signal done &amp; close</button>
+<p class="status" id="status"></p>
+<script>
+  // The session token is rewritten into this placeholder by the listener
+  // when the page is served. A blank value here means the URL query
+  // parameter `k` didn't match — the listener will reject any /done
+  // request, and the user sees an explanation instead of a stuck page.
+  const SESSION_TOKEN = "__SESSION_TOKEN__";
+
+  const button = document.getElementById("done");
+  const status = document.getElementById("status");
+
+  if (!SESSION_TOKEN) {
+    button.disabled = true;
+    status.textContent =
+      "Session token missing from URL — open this page only via the link " +
+      "the CLI printed, not by reloading from history.";
+  }
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    status.textContent = "Signalling shutdown…";
+    try {
+      const r = await fetch("/done", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionToken: SESSION_TOKEN }),
+      });
+      if (r.ok) {
+        status.textContent = "Done — the CLI will continue. You can close this tab.";
+      } else {
+        status.textContent = "Listener rejected the request (HTTP " + r.status + ").";
+      }
+    } catch (e) {
+      status.textContent = "Failed to reach the local CLI: " + e;
+    }
+  });
+</script>
+</body>
+</html>

@@ -82,6 +82,17 @@ enum InstancesCmd {
 
 #[derive(Subcommand)]
 enum AuthCmd {
+    /// Sign in interactively with a Cardano wallet via a localhost helper page.
+    ///
+    /// Starts a one-shot HTTP server on `127.0.0.1:<os-assigned-port>` and
+    /// opens the browser to it. The page connects your CIP-30 wallet
+    /// (Lace, Eternl, Nami, Yoroi, etc.), signs the challenge from
+    /// `POST /api/v0/session`, and the CLI persists the resulting JWT.
+    ///
+    /// Replaces the v0.3 DevTools-cookie-scraping flow for users who want
+    /// a guided sign-in. The `auth set` path below remains as the manual
+    /// / scripting fallback.
+    Login,
     /// Store a JWT token for an instance (get it from the browser cookie named 'token').
     ///
     /// Token source resolution (first match wins):
@@ -273,6 +284,34 @@ fn handle_instances(store: &Store, cmd: InstancesCmd) -> anyhow::Result<()> {
 fn handle_auth(store: &Store, instance: Option<String>, cmd: AuthCmd) -> anyhow::Result<()> {
     let name = resolve_instance(store, instance.as_deref())?;
     match cmd {
+        AuthCmd::Login => {
+            use concordance::auth::login::{LoginOutcome, run as run_login};
+            // Resolves the instance config so commit 3 can call into it
+            // (POST/PUT /session against the configured base URL).
+            // Resolving up front also surfaces "unknown instance" before
+            // we open a browser.
+            store.get_instance(&name)?;
+            let options = login_options_from_env();
+            match run_login(store, &name, options)? {
+                LoginOutcome::Completed => {
+                    // Commit 1 only proves the listener round-trip; the
+                    // actual token-store step lands in commit 3. The
+                    // user-visible message is shaped accordingly so a
+                    // pre-v0.4 build doesn't mislead users into thinking
+                    // they're signed in.
+                    println!(
+                        "concordance: helper-page handshake complete.\n  \
+                         (Wallet-signing wiring lands in v0.4 commits 2 + 3.)"
+                    );
+                }
+                LoginOutcome::TimedOut => {
+                    anyhow::bail!(
+                        "auth login timed out. Re-run `concordance auth login` \
+                         and complete the browser step before the deadline."
+                    );
+                }
+            }
+        }
         AuthCmd::Set { jwt, jwt_file } => {
             let jwt = resolve_jwt_input(jwt, jwt_file, &mut std::io::stdin().lock())?;
             inspect_jwt(&jwt)?; // validate it's a real JWT before storing
@@ -473,8 +512,7 @@ async fn handle_comments(
         } => {
             use concordance::api::CreateCommentRequest;
             use concordance::identity::prepare_comment_content;
-            let content =
-                prepare_comment_content(&message, omit_signature, "--omit-signature")?;
+            let content = prepare_comment_content(&message, omit_signature, "--omit-signature")?;
             let req = CreateCommentRequest {
                 proposal_id: proposal,
                 content,
@@ -488,6 +526,37 @@ async fn handle_comments(
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+
+/// Build [`LoginOptions`] honouring three test-only env overrides:
+///
+/// - `CONCORDANCE_LOGIN_NO_BROWSER`  — any non-empty value disables the
+///   auto-`open` browser launch. Used by CI / headless tests.
+/// - `CONCORDANCE_LOGIN_FIXED_PORT`  — bind a specific port instead of
+///   the OS-assigned 0. Lets the integration test pre-allocate.
+/// - `CONCORDANCE_LOGIN_DEADLINE_SECS` — shorten the 5-minute deadline
+///   so the test can fail fast on a wedge instead of consuming the
+///   real ceiling.
+///
+/// These are not documented in `--help` because they exist purely for
+/// the test harness; a real user has no reason to set them.
+fn login_options_from_env() -> concordance::auth::login::LoginOptions {
+    use std::time::Duration;
+    let mut opts = concordance::auth::login::LoginOptions::default();
+    if std::env::var_os("CONCORDANCE_LOGIN_NO_BROWSER").is_some() {
+        opts.open_browser = false;
+    }
+    if let Ok(p) = std::env::var("CONCORDANCE_LOGIN_FIXED_PORT") {
+        if let Ok(port) = p.parse::<u16>() {
+            opts.fixed_port = Some(port);
+        }
+    }
+    if let Ok(s) = std::env::var("CONCORDANCE_LOGIN_DEADLINE_SECS") {
+        if let Ok(secs) = s.parse::<u64>() {
+            opts.deadline = Duration::from_secs(secs);
+        }
+    }
+    opts
+}
 
 fn resolve_instance(store: &Store, override_name: Option<&str>) -> anyhow::Result<String> {
     Ok(match override_name {
@@ -594,8 +663,8 @@ mod tests {
         set_env("from-env");
         let f = NamedTempFile::new().unwrap();
         std::fs::write(f.path(), "from-file\n").unwrap();
-        let got = resolve_jwt_input(None, Some(f.path().to_path_buf()), &mut Cursor::new(""))
-            .unwrap();
+        let got =
+            resolve_jwt_input(None, Some(f.path().to_path_buf()), &mut Cursor::new("")).unwrap();
         assert_eq!(got, "from-file");
         clear_env();
     }
@@ -621,8 +690,12 @@ mod tests {
         // The deprecation warning goes to stderr; the test confirms the
         // literal value is still used (the warn-and-store path is the
         // documented 0.3 migration behaviour).
-        let got = resolve_jwt_input(Some("literal-token".to_string()), None, &mut Cursor::new(""))
-            .unwrap();
+        let got = resolve_jwt_input(
+            Some("literal-token".to_string()),
+            None,
+            &mut Cursor::new(""),
+        )
+        .unwrap();
         assert_eq!(got, "literal-token");
         clear_env();
     }
@@ -686,8 +759,8 @@ mod tests {
         clear_env();
         let f = NamedTempFile::new().unwrap();
         std::fs::write(f.path(), "   \n").unwrap();
-        let err =
-            resolve_jwt_input(None, Some(f.path().to_path_buf()), &mut Cursor::new("")).unwrap_err();
+        let err = resolve_jwt_input(None, Some(f.path().to_path_buf()), &mut Cursor::new(""))
+            .unwrap_err();
         assert!(err.to_string().contains("empty"), "msg: {err}");
     }
 
