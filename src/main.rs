@@ -286,40 +286,60 @@ fn handle_auth(store: &Store, instance: Option<String>, cmd: AuthCmd) -> anyhow:
     match cmd {
         AuthCmd::Login => {
             use concordance::auth::login::{LoginOutcome, run as run_login};
-            // Resolves the instance config so commit 3 can call into it
-            // (POST/PUT /session against the configured base URL).
-            // Resolving up front also surfaces "unknown instance" before
-            // we open a browser.
+            // Resolves the instance config so the listener can call
+            // POST/PUT /session against the configured base URL.
+            // Resolving up front also surfaces "unknown instance"
+            // before we open a browser.
             store.get_instance(&name)?;
             let options = login_options_from_env();
             match run_login(store, &name, options)? {
                 LoginOutcome::Completed {
                     stake_addr,
                     wallet_name,
+                    user_id,
                 } => {
-                    // Commit 2 surfaces the connected wallet + stake
-                    // address; the actual JWT-persist step lands in
-                    // commit 3. The user-visible message is shaped
-                    // accordingly so a pre-v0.4 build doesn't mislead
-                    // users into thinking they're already signed in.
-                    match (stake_addr.as_deref(), wallet_name.as_deref()) {
-                        (Some(addr), Some(wallet)) => {
-                            println!(
-                                "concordance: connected to {wallet} as {addr}.\n  \
-                                 (Signing + JWT persistence land in v0.4 commit 3.)"
-                            );
+                    // The CLI's friendly success message degrades
+                    // gracefully: if we got the full set of details
+                    // (wallet name + stake addr + persisted JWT),
+                    // show them; otherwise fall back to the most
+                    // specific message the available data supports.
+                    if let Some(uid) = user_id.as_deref() {
+                        // JWT persisted — the user is signed in.
+                        let addr = stake_addr.as_deref().unwrap_or(uid);
+                        match wallet_name.as_deref() {
+                            Some(wallet) => println!(
+                                "concordance: signed in as {addr} via {wallet}.\n  \
+                                 Token stored for instance '{name}' — try \
+                                 `concordance auth status` to confirm."
+                            ),
+                            None => println!(
+                                "concordance: signed in as {addr}.\n  \
+                                 Token stored for instance '{name}' — try \
+                                 `concordance auth status` to confirm."
+                            ),
                         }
-                        (Some(addr), None) => {
-                            println!(
-                                "concordance: connected as {addr}.\n  \
-                                 (Signing + JWT persistence land in v0.4 commit 3.)"
-                            );
-                        }
-                        _ => {
-                            println!(
-                                "concordance: helper-page handshake complete.\n  \
-                                 (Wallet-signing wiring lands in v0.4 commit 3.)"
-                            );
+                    } else {
+                        // Page completed but the signing flow didn't
+                        // produce a JWT (user closed the tab early,
+                        // wallet declined, etc.). Tell the user where
+                        // we ended up so they know whether to re-run.
+                        match (stake_addr.as_deref(), wallet_name.as_deref()) {
+                            (Some(addr), Some(wallet)) => println!(
+                                "concordance: handshake ended at the wallet \
+                                 step (connected to {wallet} as {addr}, but \
+                                 no JWT was produced). Re-run \
+                                 `concordance auth login` to retry."
+                            ),
+                            (Some(addr), None) => println!(
+                                "concordance: handshake ended at the wallet \
+                                 step (connected as {addr}, but no JWT was \
+                                 produced). Re-run `concordance auth login` \
+                                 to retry."
+                            ),
+                            _ => println!(
+                                "concordance: handshake didn't complete. \
+                                 Re-run `concordance auth login` to retry."
+                            ),
                         }
                     }
                 }

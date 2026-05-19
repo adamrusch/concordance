@@ -136,13 +136,15 @@
 
 <section class="step locked" id="step-3">
   <h2><span class="ix">3</span> Sign the challenge</h2>
-  <p>This step is wired in the next commit. For now, once you confirm the
-  stake address above, the CLI logs it and shuts the listener down.</p>
+  <p>Concordance asked Hydra Voting for a one-time signing payload tied
+  to your stake address. Approve the wallet's signature prompt to
+  complete sign-in. Nothing is broadcast on-chain — this signature
+  proves you control the key, nothing more.</p>
   <p class="status" id="step-3-status"></p>
 </section>
 
 <footer>
-  Concordance v0.4 — <code>auth login</code> commit 2 / 3
+  Concordance v0.4 — <code>auth login</code> commit 3 / 3
 </footer>
 
 <script>
@@ -290,7 +292,7 @@ $("#reconnect").addEventListener("click", () => {
 });
 
 $("#confirm-stake").addEventListener("click", async () => {
-  if (!stakeAddressBech32 || !SESSION_TOKEN) return;
+  if (!stakeAddressBech32 || !SESSION_TOKEN || !connectedApi) return;
   $("#confirm-stake").disabled = true;
   setStatus($("#step-2-status"), "Sending stake address to the CLI…");
   try {
@@ -316,13 +318,108 @@ $("#confirm-stake").addEventListener("click", async () => {
   setStatus($("#step-2-status"), "Address sent. CLI is preparing the challenge…", "success");
   setStepState("step-2", "done");
   setStepState("step-3", "active");
-  setStatus(
-    $("#step-3-status"),
-    "Commit 3 wires the signing flow here. For now, the CLI will exit cleanly — you can close this tab."
-  );
-  // In commit 2, the CLI accepts /init and shuts down via /done as a
-  // proxy for "the user finished the connect step". Commit 3 swaps this
-  // for the real challenge/sign/PUT-session loop.
+  setStatus($("#step-3-status"), "Waiting for Hydra Voting to issue the signing payload…");
+
+  // Poll /challenge until the CLI hands us a dataHex (200 + body),
+  // surfaces an error (5xx + body.error), or we time out client-side
+  // (the server's own 5-minute deadline is the canonical cap; this
+  // local 90-second poll just prevents an indefinite spinner on a
+  // wedged listener).
+  let dataHex = null;
+  const pollUntil = Date.now() + 90_000;
+  while (Date.now() < pollUntil) {
+    let r;
+    try {
+      r = await fetch("/challenge", { headers: { "Cache-Control": "no-cache" } });
+    } catch (e) {
+      setStatus($("#step-3-status"), `Couldn't reach the CLI: ${e.message || e}`, "error");
+      return;
+    }
+    if (r.status === 204) {
+      await sleep(500);
+      continue;
+    }
+    if (r.ok) {
+      let body;
+      try { body = await r.json(); } catch (_) { body = {}; }
+      if (body.dataHex) {
+        dataHex = body.dataHex;
+        break;
+      }
+      // 200 without dataHex (e.g. {"stage":"verified"}) means the
+      // flow advanced past this step — bail out and let the CLI
+      // wrap up.
+      await sleep(500);
+      continue;
+    }
+    // 5xx or other non-success
+    let msg = "Hydra Voting refused to issue a challenge.";
+    try {
+      const body = await r.json();
+      if (body && body.error) msg = body.error;
+    } catch (_) {}
+    setStatus($("#step-3-status"), msg, "error");
+    return;
+  }
+  if (!dataHex) {
+    setStatus($("#step-3-status"), "Timed out waiting for the challenge. Re-run the CLI.", "error");
+    return;
+  }
+
+  setStatus($("#step-3-status"), `Approve the signature prompt in ${selectedWallet ? selectedWallet.name : "your wallet"}…`);
+
+  // Ask the wallet to sign the dataHex. CIP-30's signData returns
+  // `{ signature: hex, key: hex }` — both CBOR-encoded COSE
+  // structures. We pass both to the CLI; Ekklesia uses `signature`
+  // and may or may not use `key` depending on the signer type.
+  let signed;
+  try {
+    signed = await connectedApi.signData(stakeAddressBech32, dataHex);
+  } catch (e) {
+    setStatus(
+      $("#step-3-status"),
+      `Wallet declined to sign: ${e.message || e.info || e}`,
+      "error"
+    );
+    return;
+  }
+  if (!signed || !signed.signature) {
+    setStatus($("#step-3-status"), "Wallet returned no signature. Try again.", "error");
+    return;
+  }
+
+  setStatus($("#step-3-status"), "Verifying signature with Hydra Voting…");
+
+  let putResp;
+  try {
+    putResp = await fetch("/signed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionToken: SESSION_TOKEN,
+        signature: signed.signature,
+        key: signed.key || null,
+      }),
+    });
+  } catch (e) {
+    setStatus($("#step-3-status"), `Couldn't reach the CLI: ${e.message || e}`, "error");
+    return;
+  }
+  if (!putResp.ok) {
+    let msg = `Hydra Voting rejected the signature (HTTP ${putResp.status}).`;
+    try {
+      const body = await putResp.json();
+      if (body && body.error) msg = body.error;
+    } catch (_) {}
+    setStatus($("#step-3-status"), msg, "error");
+    return;
+  }
+
+  setStepState("step-3", "done");
+  setStatus($("#step-3-status"), "Signed in. You can close this tab.", "success");
+  // Best-effort /done — the CLI also self-shuts after `PUT /session`
+  // succeeds, so this is belt-and-suspenders. If the page is closed
+  // before this fires, the CLI's own shutdown takes care of things.
   signalDone();
 });
 
@@ -336,6 +433,10 @@ async function signalDone() {
   } catch (e) {
     // Best-effort — the CLI's deadline will catch unreachable cases.
   }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ── Wallet detection: handle the slow-injection case ─────────────────────
