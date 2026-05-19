@@ -207,6 +207,13 @@ function detectWallets() {
 let selectedWallet = null;
 let connectedApi = null;
 let stakeAddressBech32 = null;
+// CIP-30's signData() requires the *hex* form of the stake address
+// (raw bytes hex-encoded), not the bech32 form. The Ekklesia API
+// happens to accept either form in `signerAddress` on POST/PUT
+// /session, but the COSE_Sign1 protected header that `signData`
+// produces is keyed off whatever address we pass — so this must
+// match what we send to the server, byte-for-byte.
+let stakeAddressHex = null;
 
 function renderWalletList() {
   const list = $("#wallet-list");
@@ -269,6 +276,7 @@ async function connectTo(wallet) {
     return;
   }
   const hexAddr = hexAddrs[0];
+  stakeAddressHex = hexAddr;
   try {
     stakeAddressBech32 = stakeAddressHexToBech32(hexAddr);
   } catch (e) {
@@ -283,6 +291,7 @@ $("#reconnect").addEventListener("click", () => {
   selectedWallet = null;
   connectedApi = null;
   stakeAddressBech32 = null;
+  stakeAddressHex = null;
   $("#stake-addr-display").textContent = "—";
   $("#confirm-stake").disabled = true;
   setStatus($("#step-1-status"), "");
@@ -374,7 +383,13 @@ $("#confirm-stake").addEventListener("click", async () => {
   // and may or may not use `key` depending on the signer type.
   let signed;
   try {
-    signed = await connectedApi.signData(stakeAddressBech32, dataHex);
+    // CIP-30 spec: signData(addr: hex-Address, payload: hex-Bytes).
+    // Passing the bech32 form here is the bug that made PUT /session's
+    // signature verification fail: some wallets accept bech32 and
+    // silently produce a COSE structure whose protected header carries
+    // an address byte-string that doesn't round-trip to what the
+    // server is checking. Hex from getRewardAddresses() is canonical.
+    signed = await connectedApi.signData(stakeAddressHex, dataHex);
   } catch (e) {
     setStatus(
       $("#step-3-status"),
