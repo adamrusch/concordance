@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concordance — sign in</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 40rem;
+    margin: 4rem auto 2rem;
+    padding: 0 1.5rem;
+    color: #222;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #ddd; background: #1a1a1a; }
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+  .subtitle { color: #777; margin-top: 0; margin-bottom: 2rem; font-size: 0.95em; }
+  @media (prefers-color-scheme: dark) { .subtitle { color: #888; } }
+
+  .step {
+    border: 1px solid #ddd;
+    border-radius: 0.75em;
+    padding: 1.25em;
+    margin-bottom: 1em;
+    transition: opacity 0.2s, border-color 0.2s;
+  }
+  @media (prefers-color-scheme: dark) { .step { border-color: #444; } }
+  .step.locked { opacity: 0.45; }
+  .step.active { border-color: #2c7be5; }
+  .step.done { border-color: #18a957; }
+  .step h2 { font-size: 1rem; margin: 0 0 0.5em; display: flex; align-items: center; gap: 0.5em; }
+  .step h2 .ix {
+    background: #eee; color: #333;
+    width: 1.5em; height: 1.5em; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 0.85em; font-weight: 600;
+  }
+  @media (prefers-color-scheme: dark) { .step h2 .ix { background: #333; color: #ddd; } }
+  .step.done h2 .ix { background: #18a957; color: white; }
+  .step.active h2 .ix { background: #2c7be5; color: white; }
+
+  button, select {
+    font: inherit;
+    padding: 0.5em 1em;
+    border: 1px solid currentColor;
+    border-radius: 0.5em;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button:hover:not(:disabled) { background: rgba(127,127,127,0.1); }
+  button.primary {
+    background: #2c7be5; color: white; border-color: #2c7be5;
+  }
+  button.primary:hover:not(:disabled) { background: #1a64c4; }
+
+  .wallet-list { display: grid; gap: 0.5em; margin-top: 0.75em; }
+  .wallet-row {
+    display: flex; align-items: center; gap: 0.75em;
+    padding: 0.5em 0.75em;
+    border: 1px solid transparent;
+    border-radius: 0.5em;
+    cursor: pointer;
+    background: rgba(127,127,127,0.05);
+  }
+  .wallet-row:hover { background: rgba(127,127,127,0.12); }
+  .wallet-row img { width: 28px; height: 28px; object-fit: contain; }
+  .wallet-row .name { font-weight: 500; }
+  .wallet-row .key { color: #888; font-size: 0.85em; margin-left: auto; font-family: ui-monospace, monospace; }
+
+  .stake-addr {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.9em;
+    padding: 0.5em 0.75em;
+    background: rgba(127,127,127,0.1);
+    border-radius: 0.4em;
+    word-break: break-all;
+    margin: 0.75em 0;
+  }
+  .row { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; }
+  .status {
+    margin-top: 0.5em;
+    min-height: 1.5em;
+    color: #888;
+    font-style: italic;
+    font-size: 0.9em;
+  }
+  .status.error { color: #c33; font-style: normal; }
+  .status.success { color: #18a957; font-style: normal; }
+
+  .empty {
+    text-align: center; padding: 1em; color: #888;
+  }
+  .empty a { color: inherit; }
+
+  footer {
+    margin-top: 2em; font-size: 0.8em; color: #888; text-align: center;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, monospace; }
+</style>
+</head>
+<body>
+
+<h1>Sign in to Hydra Voting with your Cardano wallet</h1>
+<p class="subtitle">
+  This page runs only on your machine (<code>localhost</code>) and talks to
+  the <code>concordance</code> CLI you launched. It never sends your data to
+  any external server other than Hydra Voting itself, via the CLI.
+</p>
+
+<section class="step active" id="step-1">
+  <h2><span class="ix">1</span> Connect your Cardano wallet</h2>
+  <p>Concordance detects every CIP-30 wallet extension your browser has
+  installed. Pick the one whose stake address you want to comment as.</p>
+  <div class="wallet-list" id="wallet-list">
+    <div class="empty">Scanning <code>window.cardano</code>…</div>
+  </div>
+  <p class="status" id="step-1-status"></p>
+</section>
+
+<section class="step locked" id="step-2">
+  <h2><span class="ix">2</span> Confirm your stake address</h2>
+  <p>Your wallet returned this stake address. It will be visible on every
+  comment you post via Concordance, so check it before continuing.</p>
+  <div class="stake-addr" id="stake-addr-display">—</div>
+  <div class="row">
+    <button id="confirm-stake" class="primary" disabled>Use this address</button>
+    <button id="reconnect">Pick a different wallet</button>
+  </div>
+  <p class="status" id="step-2-status"></p>
+</section>
+
+<section class="step locked" id="step-3">
+  <h2><span class="ix">3</span> Sign the challenge</h2>
+  <p>This step is wired in the next commit. For now, once you confirm the
+  stake address above, the CLI logs it and shuts the listener down.</p>
+  <p class="status" id="step-3-status"></p>
+</section>
+
+<footer>
+  Concordance v0.4 — <code>auth login</code> commit 2 / 3
+</footer>
+
+<script>
+"use strict";
+
+// The CLI rewrites __SESSION_TOKEN__ when serving this page. A blank
+// value here means the URL `?k=` parameter didn't match the listener's
+// expected token — every /init and /done POST will be rejected.
+const SESSION_TOKEN = "__SESSION_TOKEN__";
+
+const $ = (sel) => document.querySelector(sel);
+const setStatus = (el, msg, cls = "") => {
+  el.textContent = msg;
+  el.className = "status" + (cls ? " " + cls : "");
+};
+
+function setStepState(stepId, state) {
+  // state ∈ {"locked", "active", "done"}
+  const el = document.getElementById(stepId);
+  el.classList.remove("locked", "active", "done");
+  el.classList.add(state);
+}
+
+if (!SESSION_TOKEN) {
+  setStatus(
+    $("#step-1-status"),
+    "Session token missing from URL — open this page only via the link the CLI printed, not by reloading from history.",
+    "error"
+  );
+}
+
+// ── Wallet detection ─────────────────────────────────────────────────────
+//
+// CIP-30 puts each wallet at `window.cardano.<key>` with at minimum
+// `{ name, icon, apiVersion, enable() }`. Most current wallets also expose
+// the same surface under `window.cardano.cip30.<key>` for compatibility
+// with the legacy CIP-95 split, but we read straight off `window.cardano`
+// because that's the most-widely-supported path.
+function detectWallets() {
+  const c = window.cardano || {};
+  const wallets = [];
+  for (const key of Object.keys(c)) {
+    const w = c[key];
+    if (!w || typeof w !== "object") continue;
+    if (typeof w.enable !== "function") continue;
+    if (typeof w.name !== "string") continue;
+    wallets.push({
+      key,
+      name: w.name,
+      icon: w.icon || "",
+      apiVersion: w.apiVersion || "?",
+      ref: w,
+    });
+  }
+  // Sort alphabetically for a stable UI when multiple wallets are present.
+  wallets.sort((a, b) => a.name.localeCompare(b.name));
+  return wallets;
+}
+
+let selectedWallet = null;
+let connectedApi = null;
+let stakeAddressBech32 = null;
+
+function renderWalletList() {
+  const list = $("#wallet-list");
+  const wallets = detectWallets();
+  if (wallets.length === 0) {
+    list.innerHTML = `
+      <div class="empty">
+        No CIP-30 wallet detected.<br>
+        Install <a href="https://www.lace.io/" target="_blank" rel="noopener noreferrer">Lace</a>,
+        <a href="https://eternl.io/" target="_blank" rel="noopener noreferrer">Eternl</a>,
+        <a href="https://yoroi-wallet.com/" target="_blank" rel="noopener noreferrer">Yoroi</a>,
+        or another CIP-30 wallet, reload this page, and try again.
+      </div>`;
+    return;
+  }
+  list.innerHTML = "";
+  for (const w of wallets) {
+    const row = document.createElement("div");
+    row.className = "wallet-row";
+    row.dataset.key = w.key;
+    row.innerHTML = `
+      ${w.icon ? `<img src="${w.icon}" alt="">` : `<span style="width:28px"></span>`}
+      <span class="name"></span>
+      <span class="key"></span>
+    `;
+    row.querySelector(".name").textContent = w.name;
+    row.querySelector(".key").textContent = `window.cardano.${w.key}`;
+    row.addEventListener("click", () => connectTo(w));
+    list.appendChild(row);
+  }
+}
+
+async function connectTo(wallet) {
+  selectedWallet = wallet;
+  setStatus($("#step-1-status"), `Asking ${wallet.name} to connect…`);
+  try {
+    connectedApi = await wallet.ref.enable();
+  } catch (e) {
+    setStatus($("#step-1-status"), `${wallet.name} declined: ${e.message || e}`, "error");
+    return;
+  }
+
+  setStatus($("#step-1-status"), `Connected to ${wallet.name}.`, "success");
+  setStepState("step-1", "done");
+  setStepState("step-2", "active");
+
+  // CIP-30 returns reward (stake) addresses as hex-encoded bytes. Convert
+  // them to bech32 (`stake1...`) for the Ekklesia API, which accepts
+  // bech32 in `signerAddress`. Network discriminator: 0xe1 = mainnet
+  // stake key, 0xe0 = testnet stake key (CIP-19 header byte).
+  let hexAddrs;
+  try {
+    hexAddrs = await connectedApi.getRewardAddresses();
+  } catch (e) {
+    setStatus($("#step-2-status"), `Couldn't read stake address: ${e.message || e}`, "error");
+    return;
+  }
+  if (!Array.isArray(hexAddrs) || hexAddrs.length === 0) {
+    setStatus($("#step-2-status"), "Wallet returned no stake addresses. Make sure it's an Ada-bearing account.", "error");
+    return;
+  }
+  const hexAddr = hexAddrs[0];
+  try {
+    stakeAddressBech32 = stakeAddressHexToBech32(hexAddr);
+  } catch (e) {
+    setStatus($("#step-2-status"), `Couldn't decode stake address: ${e.message || e}`, "error");
+    return;
+  }
+  $("#stake-addr-display").textContent = stakeAddressBech32;
+  $("#confirm-stake").disabled = false;
+}
+
+$("#reconnect").addEventListener("click", () => {
+  selectedWallet = null;
+  connectedApi = null;
+  stakeAddressBech32 = null;
+  $("#stake-addr-display").textContent = "—";
+  $("#confirm-stake").disabled = true;
+  setStatus($("#step-1-status"), "");
+  setStatus($("#step-2-status"), "");
+  setStepState("step-1", "active");
+  setStepState("step-2", "locked");
+});
+
+$("#confirm-stake").addEventListener("click", async () => {
+  if (!stakeAddressBech32 || !SESSION_TOKEN) return;
+  $("#confirm-stake").disabled = true;
+  setStatus($("#step-2-status"), "Sending stake address to the CLI…");
+  try {
+    const r = await fetch("/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionToken: SESSION_TOKEN,
+        stakeAddr: stakeAddressBech32,
+        walletName: selectedWallet ? selectedWallet.name : null,
+      }),
+    });
+    if (!r.ok) {
+      setStatus($("#step-2-status"), `CLI rejected the address (HTTP ${r.status}).`, "error");
+      $("#confirm-stake").disabled = false;
+      return;
+    }
+  } catch (e) {
+    setStatus($("#step-2-status"), `Couldn't reach the CLI: ${e.message || e}`, "error");
+    $("#confirm-stake").disabled = false;
+    return;
+  }
+  setStatus($("#step-2-status"), "Address sent. CLI is preparing the challenge…", "success");
+  setStepState("step-2", "done");
+  setStepState("step-3", "active");
+  setStatus(
+    $("#step-3-status"),
+    "Commit 3 wires the signing flow here. For now, the CLI will exit cleanly — you can close this tab."
+  );
+  // In commit 2, the CLI accepts /init and shuts down via /done as a
+  // proxy for "the user finished the connect step". Commit 3 swaps this
+  // for the real challenge/sign/PUT-session loop.
+  signalDone();
+});
+
+async function signalDone() {
+  try {
+    await fetch("/done", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionToken: SESSION_TOKEN }),
+    });
+  } catch (e) {
+    // Best-effort — the CLI's deadline will catch unreachable cases.
+  }
+}
+
+// ── Wallet detection: handle the slow-injection case ─────────────────────
+//
+// Wallet extensions inject `window.cardano.*` asynchronously after the
+// page loads. Poll for ~2s before giving up and rendering the empty
+// state — by then anything that's going to inject already has.
+let pollCount = 0;
+const pollHandle = setInterval(() => {
+  pollCount++;
+  const wallets = detectWallets();
+  if (wallets.length > 0 || pollCount >= 20) {
+    clearInterval(pollHandle);
+    renderWalletList();
+  }
+}, 100);
+// Render once immediately so the page isn't empty on first paint.
+renderWalletList();
+
+// ── Bech32 encoder for Cardano stake addresses ───────────────────────────
+//
+// CIP-30 `getRewardAddresses` returns hex-encoded byte strings whose
+// first byte is the header (network ID + address type — see CIP-19) and
+// remaining bytes are the stake key hash. We need bech32 with HRP
+// `stake` (mainnet) or `stake_test` (testnet) to send to Ekklesia.
+//
+// Implements BIP-173 bech32 (not bech32m, which Cardano doesn't use for
+// stake addresses). Algorithm cribbed from the reference C and Python
+// implementations; kept under 60 lines so it's auditable inline.
+
+const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+function bech32Polymod(values) {
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const b = chk >> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) {
+      if ((b >> i) & 1) chk ^= GEN[i];
+    }
+  }
+  return chk;
+}
+
+function bech32HrpExpand(hrp) {
+  const out = [];
+  for (let i = 0; i < hrp.length; i++) out.push(hrp.charCodeAt(i) >> 5);
+  out.push(0);
+  for (let i = 0; i < hrp.length; i++) out.push(hrp.charCodeAt(i) & 31);
+  return out;
+}
+
+function bech32CreateChecksum(hrp, data) {
+  const values = bech32HrpExpand(hrp).concat(data).concat([0, 0, 0, 0, 0, 0]);
+  const polymod = bech32Polymod(values) ^ 1;
+  const out = [];
+  for (let i = 0; i < 6; i++) out.push((polymod >> (5 * (5 - i))) & 31);
+  return out;
+}
+
+function bech32Encode(hrp, data) {
+  const combined = data.concat(bech32CreateChecksum(hrp, data));
+  return hrp + "1" + combined.map((d) => BECH32_CHARSET[d]).join("");
+}
+
+function convertBits(data, fromBits, toBits, pad) {
+  let acc = 0;
+  let bits = 0;
+  const ret = [];
+  const maxv = (1 << toBits) - 1;
+  for (const v of data) {
+    if (v < 0 || v >> fromBits !== 0) throw new Error("invalid byte");
+    acc = (acc << fromBits) | v;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      ret.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0) ret.push((acc << (toBits - bits)) & maxv);
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv)) {
+    throw new Error("bech32 padding mismatch");
+  }
+  return ret;
+}
+
+function hexToBytes(hex) {
+  if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.slice(2);
+  if (hex.length % 2 !== 0) throw new Error("odd-length hex string");
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    if (Number.isNaN(bytes[i])) throw new Error("invalid hex char");
+  }
+  return Array.from(bytes);
+}
+
+function stakeAddressHexToBech32(hex) {
+  const bytes = hexToBytes(hex);
+  if (bytes.length === 0) throw new Error("empty stake address");
+  // CIP-19: header byte high nibble = address type, low nibble = network.
+  //   Reward (stake) addresses have high nibble 0xe (stake key) or 0xf
+  //   (stake script). Low nibble 0 = testnet, 1 = mainnet.
+  const header = bytes[0];
+  const network = header & 0x0f;
+  const hrp = network === 1 ? "stake" : "stake_test";
+  const data = convertBits(bytes, 8, 5, true);
+  return bech32Encode(hrp, data);
+}
+</script>
+</body>
+</html>

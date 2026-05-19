@@ -293,16 +293,35 @@ fn handle_auth(store: &Store, instance: Option<String>, cmd: AuthCmd) -> anyhow:
             store.get_instance(&name)?;
             let options = login_options_from_env();
             match run_login(store, &name, options)? {
-                LoginOutcome::Completed => {
-                    // Commit 1 only proves the listener round-trip; the
-                    // actual token-store step lands in commit 3. The
-                    // user-visible message is shaped accordingly so a
-                    // pre-v0.4 build doesn't mislead users into thinking
-                    // they're signed in.
-                    println!(
-                        "concordance: helper-page handshake complete.\n  \
-                         (Wallet-signing wiring lands in v0.4 commits 2 + 3.)"
-                    );
+                LoginOutcome::Completed {
+                    stake_addr,
+                    wallet_name,
+                } => {
+                    // Commit 2 surfaces the connected wallet + stake
+                    // address; the actual JWT-persist step lands in
+                    // commit 3. The user-visible message is shaped
+                    // accordingly so a pre-v0.4 build doesn't mislead
+                    // users into thinking they're already signed in.
+                    match (stake_addr.as_deref(), wallet_name.as_deref()) {
+                        (Some(addr), Some(wallet)) => {
+                            println!(
+                                "concordance: connected to {wallet} as {addr}.\n  \
+                                 (Signing + JWT persistence land in v0.4 commit 3.)"
+                            );
+                        }
+                        (Some(addr), None) => {
+                            println!(
+                                "concordance: connected as {addr}.\n  \
+                                 (Signing + JWT persistence land in v0.4 commit 3.)"
+                            );
+                        }
+                        _ => {
+                            println!(
+                                "concordance: helper-page handshake complete.\n  \
+                                 (Wallet-signing wiring lands in v0.4 commit 3.)"
+                            );
+                        }
+                    }
                 }
                 LoginOutcome::TimedOut => {
                     anyhow::bail!(
