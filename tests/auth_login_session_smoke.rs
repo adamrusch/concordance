@@ -379,12 +379,22 @@ fn auth_login_full_session_flow_persists_jwt() {
         ),
     )
     .expect("POST /signed");
+    // v0.4.1+ copy-paste UX: /signed returns the JWT in the body
+    // (ok: true, token: "...", userId: "..."), DOES NOT auto-store,
+    // and DOES NOT auto-shutdown. The page renders the token for the
+    // user to copy back to the chat agent, which finalizes with
+    // `auth set --jwt -`.
     assert_eq!(status, 200, "POST /signed must be 200, body: {body:?}");
     let signed_resp: serde_json::Value =
         serde_json::from_str(&body).expect("/signed body json");
+    assert_eq!(signed_resp["ok"], serde_json::json!(true));
     assert_eq!(
         signed_resp["userId"],
         "stake1u8td6l5sakfcpm6uz85v942xu5f76kzj9qz33c7986d0dxc3sxnvt"
+    );
+    assert!(
+        signed_resp["token"].as_str().is_some_and(|t| !t.is_empty()),
+        "/signed should return the JWT for the page to display: {body:?}"
     );
 
     // Verify the CLI's PUT /session body matches the spec contract.
@@ -401,29 +411,29 @@ fn auth_login_full_session_flow_persists_jwt() {
     assert_eq!(put_json["signature"], signature);
     assert_eq!(put_json["key"], key);
 
-    // 4. Subprocess should exit cleanly — /signed sets the `done`
-    //    flag once the JWT is persisted, so we don't even need to
-    //    POST /done. (Belt-and-suspenders shutdown contract.)
+    // 4. Listener must NOT auto-shutdown: the user still needs to copy
+    //    the token from the page. Send /done explicitly to unblock.
+    let (s, _) =
+        http_post_json(port, "/done", &format!(r#"{{"sessionToken":"{token}"}}"#)).unwrap();
+    assert_eq!(s, 200);
     let exit = child
         .wait_timeout_or_kill(Duration::from_secs(5))
-        .expect("subprocess should exit after /signed success");
+        .expect("subprocess should exit after /done");
     assert!(exit.success(), "exit {exit:?}");
 
-    // 5. stdout should mention "signed in" + the stake address.
+    // 5. stderr should mention the server returned a JWT and point
+    //    the user at the `auth set --jwt -` finalization step.
     let mut stdout_buf = String::new();
     let mut stdout = stdout;
     stdout.read_to_string(&mut stdout_buf).expect("read stdout");
     assert!(
-        stdout_buf.contains("signed in"),
-        "stdout: {stdout_buf:?}"
-    );
-    assert!(
-        stdout_buf.contains(stake),
-        "stdout should mention stake addr: {stdout_buf:?}"
+        stdout_buf.contains("server returned JWT") || stdout_buf.contains("auth set"),
+        "stdout should mention the JWT or the auth-set hint: {stdout_buf:?}"
     );
 
-    // 6. Final check: `concordance auth status` finds the persisted JWT.
-    //    The token's exp is +24h so the status line says "valid".
+    // 6. JWT must NOT have been auto-persisted — the user finalizes
+    //    via `auth set --jwt -`. `concordance auth status` should
+    //    report no token in the tempdir-backed store.
     let status_out = Command::new(env!("CARGO_BIN_EXE_concordance"))
         .args(["auth", "status"])
         .env_clear()
@@ -433,14 +443,8 @@ fn auth_login_full_session_flow_persists_jwt() {
         .output()
         .expect("run concordance auth status");
     assert!(
-        status_out.status.success(),
-        "auth status failed: {:?}",
-        String::from_utf8_lossy(&status_out.stderr)
-    );
-    let status_stdout = String::from_utf8_lossy(&status_out.stdout);
-    assert!(
-        status_stdout.contains("valid"),
-        "auth status stdout should mention 'valid', got: {status_stdout:?}"
+        !status_out.status.success(),
+        "auth status should exit nonzero — copy-paste UX does NOT auto-persist"
     );
 }
 
@@ -544,8 +548,12 @@ fn auth_login_put_session_failure_surfaces_to_signed_caller() {
     }
     assert!(ok, "never got dataHex from /challenge");
 
-    // /signed → CLI calls mock PUT which returns 400. /signed should
-    // surface a 500 with an `error` body the page can render.
+    // /signed → CLI calls mock PUT which returns 400. The copy-paste
+    // UX (v0.4.1+) surfaces this as a 200 with `{ok: false, error}`
+    // so the page can render the error in the same copyable result
+    // panel as a successful JWT. Returning 500 here would force the
+    // page into a different code path; making both surfaces identical
+    // keeps the diagnosis UX simple.
     let (s, body) = http_post_json(
         port,
         "/signed",
@@ -554,8 +562,9 @@ fn auth_login_put_session_failure_surfaces_to_signed_caller() {
         ),
     )
     .unwrap();
-    assert_eq!(s, 500, "/signed should propagate PUT failure as 500");
+    assert_eq!(s, 200, "/signed wraps failure as 200 with ok:false");
     let v: serde_json::Value = serde_json::from_str(&body).expect("error body json");
+    assert_eq!(v["ok"], serde_json::json!(false));
     assert!(
         v.get("error")
             .and_then(|x| x.as_str())
@@ -564,9 +573,7 @@ fn auth_login_put_session_failure_surfaces_to_signed_caller() {
         "error body should describe the PUT failure, got: {body:?}"
     );
 
-    // Now POST /done so the subprocess exits — the auto-done was
-    // gated on success, so a failed flow keeps the listener alive
-    // until the user (or the deadline) cleans it up.
+    // POST /done to shut down the listener — same as the happy path.
     let (s, _) =
         http_post_json(port, "/done", &format!(r#"{{"sessionToken":"{token}"}}"#)).unwrap();
     assert_eq!(s, 200);

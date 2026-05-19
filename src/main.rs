@@ -304,18 +304,25 @@ fn handle_auth(store: &Store, instance: Option<String>, cmd: AuthCmd) -> anyhow:
                     // show them; otherwise fall back to the most
                     // specific message the available data supports.
                     if let Some(uid) = user_id.as_deref() {
-                        // JWT persisted — the user is signed in.
+                        // v0.4.1+ copy-paste UX: the JWT was returned
+                        // by the API and is visible on the helper page;
+                        // it has NOT been written to the local store
+                        // yet — the user copies it from the page and
+                        // finalizes with `auth set --jwt -` in their
+                        // chat session. Tell them exactly that.
                         let addr = stake_addr.as_deref().unwrap_or(uid);
                         match wallet_name.as_deref() {
                             Some(wallet) => println!(
                                 "concordance: signed in as {addr} via {wallet}.\n  \
-                                 Token stored for instance '{name}' — try \
-                                 `concordance auth status` to confirm."
+                                 JWT returned in the helper page — copy it from there \
+                                 and finalize with:\n      \
+                                     pbpaste | concordance --instance {name} auth set --jwt -"
                             ),
                             None => println!(
                                 "concordance: signed in as {addr}.\n  \
-                                 Token stored for instance '{name}' — try \
-                                 `concordance auth status` to confirm."
+                                 JWT returned in the helper page — copy it from there \
+                                 and finalize with:\n      \
+                                     pbpaste | concordance --instance {name} auth set --jwt -"
                             ),
                         }
                     } else {

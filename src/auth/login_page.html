@@ -101,6 +101,33 @@
     margin-top: 2em; font-size: 0.8em; color: #888; text-align: center;
   }
   code { font-family: ui-monospace, SFMono-Regular, monospace; }
+
+  /* Copy-paste result panel rendered after PUT /session resolves. */
+  .result-panel {
+    border: 1px solid #ddd; border-radius: 6px;
+    padding: 1em; margin-top: 1em;
+  }
+  .result-panel.success { border-color: #2e7d32; background: #f1f8f2; }
+  .result-panel.error   { border-color: #c62828; background: #fdf2f1; }
+  .result-panel h3 { margin: 0 0 0.4em; }
+  .result-panel textarea {
+    width: 100%; box-sizing: border-box;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.9em; resize: vertical;
+    margin: 0.6em 0;
+  }
+  .result-actions {
+    display: flex; gap: 0.6em; flex-wrap: wrap;
+  }
+  .result-actions button {
+    padding: 0.4em 0.9em; font-size: 0.95em;
+  }
+  .result-actions button.secondary {
+    background: transparent; border: 1px solid #ccc; color: #444;
+  }
+  .result-feedback {
+    margin: 0.6em 0 0; font-size: 0.85em; color: #555;
+  }
 </style>
 </head>
 <body>
@@ -420,23 +447,88 @@ $("#confirm-stake").addEventListener("click", async () => {
     setStatus($("#step-3-status"), `Couldn't reach the CLI: ${e.message || e}`, "error");
     return;
   }
-  if (!putResp.ok) {
-    let msg = `Hydra Voting rejected the signature (HTTP ${putResp.status}).`;
-    try {
-      const body = await putResp.json();
-      if (body && body.error) msg = body.error;
-    } catch (_) {}
-    setStatus($("#step-3-status"), msg, "error");
+  // Copy-paste UX: read whatever the CLI returned (JWT or error)
+  // and render it as a copyable blob with instructions. The user
+  // pastes the value back into the chat session that started
+  // `auth login`, and the agent finalizes with `auth set --jwt -`
+  // (success) or diagnoses (error).
+  let body;
+  try {
+    body = await putResp.json();
+  } catch (e) {
+    setStatus(
+      $("#step-3-status"),
+      `Couldn't parse the CLI response: ${e.message || e}`,
+      "error"
+    );
     return;
   }
 
-  setStepState("step-3", "done");
-  setStatus($("#step-3-status"), "Signed in. You can close this tab.", "success");
-  // Best-effort /done — the CLI also self-shuts after `PUT /session`
-  // succeeds, so this is belt-and-suspenders. If the page is closed
-  // before this fires, the CLI's own shutdown takes care of things.
-  signalDone();
+  if (body && body.ok && body.token) {
+    setStepState("step-3", "done");
+    showCopyableResult({
+      title: "✓ Signed in — copy this JWT and paste it into your Claude chat",
+      hint: "The chat agent will finalize with `concordance auth set --jwt -`.",
+      value: body.token,
+      kind: "success",
+    });
+  } else {
+    const errorBlob = JSON.stringify(body || { error: `HTTP ${putResp.status}` }, null, 2);
+    showCopyableResult({
+      title: "Sign-in failed — copy this and paste it into your Claude chat",
+      hint: "The agent will diagnose the failure from the response shape.",
+      value: errorBlob,
+      kind: "error",
+    });
+  }
 });
+
+/// Render the result panel: title + hint + textarea (read-only,
+/// pre-selected) + Copy button + Done button (POSTs /done to shut
+/// down the CLI listener). Called for both success and failure
+/// paths so the UX is identical and the user always has a
+/// copyable blob.
+function showCopyableResult({ title, hint, value, kind }) {
+  const status = $("#step-3-status");
+  setStatus(status, "");
+  // Re-purpose step-3's status slot with a structured result panel.
+  const panel = document.createElement("div");
+  panel.className = `result-panel ${kind}`;
+  panel.innerHTML = `
+    <h3>${title}</h3>
+    <p>${hint}</p>
+    <textarea readonly rows="${kind === "success" ? 4 : 8}" id="result-value"></textarea>
+    <div class="result-actions">
+      <button type="button" id="copy-result">Copy to clipboard</button>
+      <button type="button" id="done-result" class="secondary">Done — close listener</button>
+    </div>
+    <p class="result-feedback" id="copy-feedback"></p>
+  `;
+  status.appendChild(panel);
+
+  const ta = $("#result-value");
+  ta.value = value;
+  ta.select();
+
+  $("#copy-result").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      $("#copy-feedback").textContent = "Copied. Paste it into your Claude chat now.";
+    } catch (_e) {
+      // Clipboard API can be blocked; fall back to selecting the
+      // textarea so the user can Cmd+C / Ctrl+C manually.
+      ta.focus();
+      ta.select();
+      $("#copy-feedback").textContent =
+        "Clipboard access blocked. The value is selected — press Cmd+C / Ctrl+C to copy.";
+    }
+  });
+
+  $("#done-result").addEventListener("click", () => {
+    signalDone();
+    $("#copy-feedback").textContent = "Listener shut down. You can close this tab.";
+  });
+}
 
 async function signalDone() {
   try {

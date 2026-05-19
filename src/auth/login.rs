@@ -195,8 +195,18 @@ struct LoginContext {
     session_token: String,
     bound_port: u16,
     base_url: String,
+    /// Carried for diagnostic logging and future re-introduction of
+    /// auto-store. The copy-paste UX in v0.4.1+ deliberately does not
+    /// touch the store from this code path — the user finalizes via
+    /// `auth set --jwt -` in chat — but if/when the signing flow is
+    /// proven stable, a `--no-paste` flag can re-enable auto-store
+    /// against this same field.
+    #[allow(dead_code)]
     instance_name: String,
     rt_handle: Handle,
+    /// Same rationale as `instance_name`: kept so re-enabling
+    /// auto-store doesn't need a struct change.
+    #[allow(dead_code)]
     store: Store,
 }
 
@@ -633,48 +643,42 @@ fn handle_signed(
         .rt_handle
         .block_on(put_session(&ctx.base_url, &stake_addr, &signature, key.as_deref()));
 
+    // Copy-paste UX (v0.4.1+): instead of auto-storing the JWT, we
+    // return it (or the raw error) to the page, which renders a
+    // copyable blob the user pastes back into their chat session.
+    // The chat agent then finalizes with `auth set --jwt -`. This
+    // gives us a forward path while signature-verification quirks
+    // are still being chased empirically.
     match result {
         Ok(auth) => {
-            // Validate the JWT before storing it: same `inspect_jwt`
-            // contract `auth set` uses (3 dot-separated parts, decodable
-            // payload, present `exp`). If the API misbehaves we want
-            // to surface that as a session error, not a corrupt store.
+            // Still validate the JWT so a malformed token from a
+            // misbehaving server shows up as a session error before
+            // the user copy-pastes garbage into the chat.
             match inspect_jwt(&auth.token) {
                 Ok(info) => {
-                    if let Err(e) = ctx.store.set_token(&ctx.instance_name, &auth.token) {
-                        let msg = format!("failed to persist JWT: {e}");
-                        let mut guard = state.lock().expect("login state mutex poisoned");
-                        guard.stage = FlowStage::VerifyError(msg.clone());
-                        let _ = respond_json(
-                            req,
-                            StatusCode(500),
-                            &json!({ "error": msg }).to_string(),
-                        );
-                        return;
-                    }
                     let status_line = info.status_line();
-                    let user_id = info.user_id.or(Some(auth.user_id.clone()));
+                    let user_id = info.user_id.unwrap_or_else(|| auth.user_id.clone());
                     let _ = writeln!(
                         std::io::stderr(),
-                        "concordance: signed in as {} ({})",
-                        user_id.as_deref().unwrap_or(&auth.user_id),
+                        "concordance: server returned JWT for {} ({}). Copy the value from the helper page and finalize with `auth set --jwt -`.",
+                        user_id,
                         status_line,
                     );
                     {
                         let mut guard = state.lock().expect("login state mutex poisoned");
-                        guard.user_id = user_id.clone();
+                        guard.user_id = Some(user_id.clone());
                         guard.stage = FlowStage::Verified;
                     }
-                    // Auto-shutdown once we've persisted the JWT. The
-                    // page will also POST /done on success, but
-                    // setting `done` here means a misbehaving page
-                    // (or a tab the user closed before the success
-                    // step) can't keep the listener alive.
-                    done.store(true, Ordering::Release);
                     let _ = respond_json(
                         req,
                         StatusCode(200),
-                        &json!({ "userId": user_id }).to_string(),
+                        &json!({
+                            "ok": true,
+                            "token": auth.token,
+                            "userId": user_id,
+                            "expiresIn": auth.expires_in,
+                        })
+                        .to_string(),
                     );
                 }
                 Err(e) => {
@@ -683,24 +687,37 @@ fn handle_signed(
                     guard.stage = FlowStage::VerifyError(msg.clone());
                     let _ = respond_json(
                         req,
-                        StatusCode(500),
-                        &json!({ "error": msg }).to_string(),
+                        StatusCode(200),
+                        &json!({
+                            "ok": false,
+                            "error": msg,
+                            "rawToken": auth.token,
+                            "userId": auth.user_id,
+                        })
+                        .to_string(),
                     );
                 }
             }
         }
         Err(e) => {
+            // Pass the raw upstream failure through to the page so the
+            // user can copy it back to the chat for diagnosis. This is
+            // the surface that catches signing-format mismatches, CORS
+            // quirks, server errors, etc.
             let msg = format!("PUT /session failed: {e}");
             let _ = writeln!(std::io::stderr(), "concordance: {msg}");
             let mut guard = state.lock().expect("login state mutex poisoned");
             guard.stage = FlowStage::VerifyError(msg.clone());
             let _ = respond_json(
                 req,
-                StatusCode(500),
-                &json!({ "error": msg }).to_string(),
+                StatusCode(200),
+                &json!({ "ok": false, "error": msg }).to_string(),
             );
         }
     }
+    // No auto-store, no auto-shutdown on this path; the page POSTs
+    // /done explicitly once the user has copied the value.
+    let _ = done; // keep the binding silenced; /done still closes the listener
 }
 
 /// `POST /done` — page tells the CLI it can shut the listener down.
