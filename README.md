@@ -164,16 +164,18 @@ This three-way link is your **proof of identity**. The stake address proves cryp
 | Identity & verification-post flow | ✅ (v0.3) |
 | MCP server over stdio (Claude Code, Cursor, Continue, …) | ✅ |
 | First-boot banner + clear `--help` output | ✅ |
+| **Wallet-mediated sign-in (`concordance auth login`)** | ✅ **v0.4 — verified against live Hydra Voting (Eternl wallet → JWT issued, no DevTools dance)** |
 | `like`, edit-your-own-comment, focused thread reads | 🚧 v0.2.1 |
-| Generated tool descriptors for OpenAI / Gemini | 🚧 v0.4 |
-| Submit / withdraw proposals (proposer flow) | 🚧 v0.4 |
+| Generated tool descriptors for OpenAI / Gemini | 🚧 v0.5 |
+| Submit / withdraw proposals (proposer flow) | 🚧 v0.5 |
 
 The current tool catalog has 12 tools. The full spec — with arguments, return shapes, and design rationale — is at [docs/mcp-tool-surface.md](docs/mcp-tool-surface.md).
 
 ## Roadmap
 
 - **v0.2.1** — round out the read & write surface: comment likes, comment editing (15-min window on the server), focused thread reads by author type. (The proposal `search`/`proposer`/`category`/`sort` filters landed early in v0.3.x once the upstream OpenAPI spec was vendored at [docs/upstream/proposals-openapi.yaml](docs/upstream/proposals-openapi.yaml).)
-- **v0.4** — proposal-authoring tools for DReps and CC members submitting their own proposals; generated tool descriptors so OpenAI, Gemini, and Grok can use Concordance natively without per-LLM adapters.
+- **v0.4 (shipped)** — `concordance auth login`: localhost-mediated wallet sign-in, no DevTools required. The CIP-30 wallet signs a one-time challenge, the CLI exchanges it for a JWT, and the token is persisted automatically. Replaces the cookie-scraping flow as the recommended onboarding path. The wire shape for `PUT /api/v0/session` was undocumented in the published spec — see [docs/upstream/proposals-openapi.yaml](docs/upstream/proposals-openapi.yaml) and `src/auth/login.rs` for the corrections.
+- **v0.5** — proposal-authoring tools for DReps and CC members submitting their own proposals; generated tool descriptors so OpenAI, Gemini, and Grok can use Concordance natively without per-LLM adapters.
 
 If you have an opinion on what should land next, open an issue.
 
@@ -187,7 +189,7 @@ Direct CLI use (no LLM in the loop) is the same as exegesis: `concordance --help
 cargo test --release
 ```
 
-…runs 126 tests across 5 suites: unit tests for parsing, auth, store, identity; property tests; integration round-trip tests; and an MCP smoke test that spawns the binary, drives the MCP protocol over stdio, and asserts the v0.3 tool catalog + annotation contract.
+…runs 159 tests across 6 suites: unit tests for parsing, auth, store, identity; property tests; integration round-trip tests; an MCP smoke test that spawns the binary and asserts the v0.3 tool catalog over stdio; and an end-to-end `auth login` smoke that mocks an Ekklesia server and drives the full wallet-sign-in handshake.
 
 ## License
 
