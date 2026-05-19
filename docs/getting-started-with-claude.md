@@ -8,12 +8,12 @@ Claude runs all the terminal commands and calls the right MCP tools.
 If you're comfortable in a terminal, see the [README](../README.md) instead —
 this guide just wraps the same commands in a Claude-mediated flow.
 
-## Two things require you to leave Claude
+## One thing requires you to leave Claude
 
-1. **Sign in to the voting platform with your Cardano wallet** — only you can
-   sign the authentication challenge.
-2. **Copy one cookie from your browser** — Claude can't read your browser
-   cookies, so you have to paste the value into chat.
+**Sign in to the voting platform with your Cardano wallet** — only you can
+approve the wallet's signature prompt. Concordance opens a localhost helper
+page in your browser that connects your CIP-30 wallet and walks you through
+the three steps; everything else stays in chat.
 
 Everything else — collecting your identity, installing Concordance,
 configuring it, posting comments with your signature — Claude does for you.
@@ -54,108 +54,49 @@ The values are stored in `~/.config/concordance/identity.toml` (macOS:
 `~/Library/Application Support/concordance/identity.toml`). You can read or
 edit this file directly at any time.
 
-## Step 2 — Sign in to Hydra-Voting with a Cardano wallet
+## Step 2 — Sign in with `concordance auth login`
 
-Open <https://hydra-voting.intersectmbo.org> in your browser. Sign in with
-**the wallet you want to be publicly identified with** — its stake address
-will be visible on every comment you post, and other community members will
-use it to verify your identity claim from Step 1.
+Ask Claude:
+
+> *"Sign me in to Concordance."*
+
+Claude runs `concordance auth login`. The CLI:
+
+1. Opens a one-shot HTTP server on `127.0.0.1` at a random port.
+2. Launches your default browser at `http://localhost:<port>/auth?k=<token>`.
+3. Detects every CIP-30 wallet you have installed (Lace, Eternl, Nami,
+   Yoroi, Vespr, etc.). You pick the wallet whose stake address you want
+   to be publicly identified with — that address will be visible on every
+   comment you post.
+4. Asks the wallet to sign a one-time challenge from Hydra Voting (no
+   on-chain activity; the signature only proves you control the key).
+5. Submits the signature to `PUT /api/v0/session`, receives a JWT,
+   stores it for you. No DevTools, no cookie-scraping.
 
 > You can sign in either as a **DRep** or as a **regular Ada holder**.
 > Concordance works with both. The Ekklesia API accepts feedback comments
 > from any authenticated user regardless of DRep status.
 
-Once you see your stake address in the corner of the page, you're in.
+When the helper page says **"Signed in"**, you're done — close the tab.
+The CLI prints `concordance: signed in as stake1u...` and exits.
 
-Tell Claude: *"I'm signed in to Hydra-Voting."*
+> **If the browser doesn't auto-open** (headless box, no `$BROWSER`),
+> the CLI prints the URL on stderr — paste it into any browser on the
+> same machine. The listener only accepts requests from `127.0.0.1` /
+> `localhost`, so the helper page can't be loaded remotely.
 
-## Step 3 — Copy your `token` cookie
+### Manual / scripting fallback: `auth set`
 
-The cookie is `HttpOnly`, so the JavaScript console can't read it and we
-can't ship a bookmarklet that prints it for you. You have to grab it out
-of DevTools.
+If you can't run a browser on the same machine as Concordance (CI
+runners, remote dev boxes you SSH into, etc.), the v0.3 `auth set`
+path still works: paste a JWT in via stdin, a file, or `$CONCORDANCE_JWT`.
+See `concordance auth set --help` for the full source list.
 
-> **Heads-up: this is the most awkward step.** Three different browsers
-> use three different DevTools paths, and Chromium's cookie inspector
-> sometimes truncates the value if you single-click instead of
-> double-click. The single-paragraph fix exists per browser below; if
-> you get a token shorter than ~300 characters, jump to the
-> [troubleshooting](#troubleshooting) section.
+`auth set` is also useful if you already have a long-lived JWT from
+another tool — e.g. a CI secrets store — and don't want to re-prompt
+your wallet every day.
 
-**Chrome / Edge / Brave / Arc:**
-
-1. Press `Cmd+Option+I` (macOS) or `Ctrl+Shift+I` (Windows/Linux).
-2. Click the **Application** tab. (Use the `»` overflow menu if it's hidden.)
-3. Left sidebar: **Storage → Cookies → `https://hydra-voting.intersectmbo.org`**.
-4. Find the row where **Name** is `token`. **Double-click** its **Value**
-   cell — it expands to a long string with three dot-separated segments.
-   (A single click truncates the display; double-clicking expands it for
-   real.)
-5. `Cmd+A`, `Cmd+C`. Expect roughly 300–1500 characters.
-
-**Firefox:**
-
-1. `Cmd+Option+I` → **Storage** tab → **Cookies → hydra-voting.intersectmbo.org**.
-2. Click the `token` row; right-click the value → **Copy**.
-
-**Safari:**
-
-1. Enable Develop menu: **Safari → Settings → Advanced → "Show features for web developers"**.
-2. `Cmd+Option+I` → **Storage** → **Cookies → hydra-voting.intersectmbo.org**.
-3. Copy the **Value** column for the `token` row.
-
-> **Why is there no one-click flow?** The token cookie is `HttpOnly`, so
-> JavaScript on the page can't read it — a bookmarklet that prints the
-> token is impossible client-side. A proper one-click flow (OAuth-style
-> loopback callback, or a server-rendered "show my CLI token" page) is
-> tracked in [issue #3](https://github.com/adamrusch/concordance/issues/3);
-> both options need a small endpoint on the Hydra Voting side, so they
-> have to land server-side first.
-
-### Security note
-
-The `token` is bearer-equivalent — anyone who has it can act as you on
-the platform until it expires (typically ~24 hours). Three ways to keep
-it off shell history and out of `ps`:
-
-| Path | Best for | How |
-|---|---|---|
-| **Pipe from clipboard** | Most users on the happy path | `pbpaste \| concordance auth set --jwt -` (macOS), `xclip -selection clipboard -o \| concordance auth set --jwt -` (X11), `wl-paste \| concordance auth set --jwt -` (Wayland). The shell records only the pipe command, not the token. |
-| **Read from file** | Already have the token in a secrets file (CI, GnuPG-decrypted snippet, etc.) | `concordance auth set --jwt-file /run/secrets/hydra-voting-jwt` |
-| **Environment variable** | You want to set once for the whole session, including the running MCP server | `export CONCORDANCE_JWT="$(pbpaste)" && concordance auth set` — `CONCORDANCE_JWT` is the same env var the MCP server already reads per-session, so this works even without writing to disk |
-
-Two safer options if you don't want to paste the token into chat at all:
-
-- **Type it into a local file yourself.** Ask Claude: *"I'd rather not
-  paste my JWT in chat — set up a local file route."* Claude will tell
-  you exactly what to write where, so the value never enters this
-  conversation. The `--jwt-file` or `CONCORDANCE_JWT` form then reads
-  it directly.
-- **Rotate after.** Log out of hydra-voting.intersectmbo.org when you're
-  done. That invalidates the token.
-
-> The `--jwt <literal>` form still works for backwards compatibility
-> but emits a deprecation warning on stderr; it writes the token to
-> your shell history file. Removed in a future release.
-
-## Step 4 — Claude configures Concordance
-
-Once you've pasted the token, Claude will:
-
-1. Build Concordance if it's not already built (`cargo build --release` —
-   first build takes a few minutes; subsequent runs are instant).
-2. Store your token. Claude pipes the JWT into `concordance auth set
-   --jwt -` (reading from stdin) so the token never appears in your shell
-   history or in `ps` output. (As of v0.3.1, the Hydra Voting instance
-   URL ships with the binary — no separate `instances add` step needed.)
-3. Verify the token is valid (`auth_status` shows time-to-expiry and the
-   stake address that signed it).
-4. **Link the stake address** to your identity file from Step 1
-   (`link_stake_address`).
-5. Run a read smoke test (`list_votes` returns the active vote cycles
-   with computed feedback-window state).
-
-## Step 5 — Post a verification message on X or the Cardano Forum
+## Step 3 — Post a verification message on X or the Cardano Forum
 
 Ask Claude:
 
@@ -176,7 +117,7 @@ that X / Forum account.
 You only need to do this once per identity (or whenever you switch to a
 different wallet).
 
-## Step 6 — Review and comment
+## Step 4 — Review and comment
 
 You're set up. Ask Claude things like:
 
@@ -203,7 +144,9 @@ The agent's drafts go through `create_comment`, which:
 
 ## Troubleshooting
 
-**`401 JWT rejected`** — your token expired. Re-do Step 3 to grab a fresh one.
+**`401 JWT rejected`** — your token expired. Re-run
+`concordance auth login` (or ask Claude *"Sign me in to Concordance again."*)
+to mint a fresh one.
 
 **`no identity configured`** — you skipped Step 1. Ask Claude: *"Set up
 my Concordance identity."*
@@ -211,16 +154,27 @@ my Concordance identity."*
 **`stake address not yet linked`** when generating the verification post —
 you skipped the linking step. Ask Claude: *"Link my stake address."*
 
-**The cookie isn't visible in DevTools** — make sure you're signed in (not
-just on the landing page) and that you've clicked the cookie scope for
-`https://hydra-voting.intersectmbo.org` specifically.
+**No CIP-30 wallet detected on the helper page** — install Lace, Eternl,
+Yoroi, Nami, or any other CIP-30-compatible browser extension, then
+reload the page (or re-run `concordance auth login`). Wallets inject
+their API into `window.cardano.*` only after the extension has finished
+loading.
 
-**Token is short / only one segment when pasted** — DevTools sometimes
-truncates the displayed value when you single-click the cell. A real JWT
-is three dot-separated segments (`header.payload.signature`) and 300–1500
-characters total. Fix: double-click the **Value** cell to expand it,
-*then* `Cmd+A` and `Cmd+C`. If you see "JWT invalid: expected 3
-dot-separated parts" from `auth set`, that's the truncation symptom.
+**Browser didn't open** — the CLI prints `If the browser didn't open,
+paste this URL` followed by a `http://localhost:<port>/auth?k=...`
+link on stderr. Paste that into any browser running on the same
+machine. The listener binds `127.0.0.1` only, so a browser on a
+different machine can't reach it (and a `Host:` header from a public
+DNS name resolving to 127.0.0.1 is rejected too).
+
+**Wallet declined to sign** — re-run `concordance auth login`. The
+helper page surfaces wallet error messages inline so you can see why
+the prompt was rejected (locked wallet, wrong network, etc.).
+
+**Manual / scripting paths** — if you have a JWT from another source
+or can't run a wallet on this machine, `concordance auth set --jwt -`
+(stdin), `--jwt-file <path>`, or `$CONCORDANCE_JWT` all still work
+and won't trigger the browser flow.
 
 **`error: store error: ... WouldBlock`** — fixed in v0.3.2; if you still
 see it, you're on an older build. Pull, `cargo build --release`, retry.

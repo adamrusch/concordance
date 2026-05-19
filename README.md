@@ -110,7 +110,7 @@ Start with:
 Claude will walk you through:
 
 1. **Your community identity.** Three questions: the name you go by in the Cardano community, your X handle (without the `@`), and your Cardano Forum username. Use `none` for X or Forum if you don't have an account there.
-2. **Wallet sign-in.** You'll log in to <https://hydra-voting.intersectmbo.org> with your wallet (DReps and regular Ada holders both work). Then you'll copy one cookie value out of your browser's DevTools and paste it in chat. Claude stores it locally; it never leaves your machine.
+2. **Wallet sign-in.** Claude runs `concordance auth login` — a one-shot localhost helper page opens in your default browser, detects every CIP-30 wallet you have installed (Lace, Eternl, Yoroi, Nami, Vespr, …), asks you to pick one, and prompts the wallet to sign a one-time challenge. The JWT is stored locally; it never leaves your machine. (The older `auth set` path stays as a manual / scripting fallback — see `concordance auth set --help`.)
 3. **Stake address linking.** Claude reads the stake address out of your authentication token and adds it to your local identity file.
 4. **Verification post.** Claude shows you a short message to copy-paste publicly to X or the Cardano Forum. This is what lets other community members confirm the signature on your comments is really you. You only do this once per wallet.
 
